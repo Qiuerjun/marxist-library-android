@@ -1,0 +1,154 @@
+:root {
+    --paper: #FBF8F2;
+    --ink: #28231E;
+    --accent: #8B3E36;
+    --rule: #DDD1C2;
+    --highlight: #FAD9A1;
+    --size: 18px;
+    --spacing: 1.7;
+    --margin: 22px;
+    --face: sans-serif;
+    --paragraph-gap: .8em;
+    --first-indent: 2em;
+    --measure: 42em;
+    color-scheme: var(--scheme, light);
+}
+
+html {
+    background: var(--paper);
+    color: var(--ink);
+    scroll-padding-top: 16px;
+}
+
+body {
+    box-sizing: border-box;
+    max-width: calc(var(--measure) + var(--margin) + var(--margin));
+    margin: 0 auto;
+    padding: 18px var(--margin) 48px;
+    font: var(--size)/var(--spacing) var(--face);
+    line-break: strict;
+    word-break: normal;
+    overflow-wrap: break-word;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    line-height: 1.4;
+    margin: 1.35em 0 .55em;
+}
+
+h1 {
+    font-size: 1.62em;
+}
+
+h2 {
+    font-size: 1.3em;
+}
+
+h3 {
+    font-size: 1.16em;
+}
+
+p {
+    margin: 0 0 var(--paragraph-gap);
+}
+
+p[data-reader-prose] {
+    text-indent: var(--first-indent);
+}
+
+.reader-source-indent {
+    display: none;
+}
+
+a {
+    color: var(--accent);
+    text-underline-offset: .18em;
+}
+
+.reader-source-links {
+    margin-bottom: .6em;
+    font-size: .85em;
+}
+
+a[data-reader-footnote] {
+    display: inline-block;
+    min-width: 1.25em;
+    padding: 0 .18em;
+    border: 1px solid var(--rule);
+    border-radius: .35em;
+    text-align: center;
+    line-height: 1.35;
+    text-decoration: none;
+    white-space: nowrap;
+    text-indent: 0;
+}
+
+img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+}
+
+figure {
+    margin: 1.4em 0;
+}
+
+figcaption {
+    margin-top: .35em;
+    font-size: .875em;
+    text-align: center;
+}
+
+blockquote {
+    border-inline-start: 2px solid var(--rule);
+    margin: 1.2em 0;
+    padding-inline: .85em;
+}
+
+table {
+    display: block;
+    max-width: 100%;
+    margin: 1.2em 0;
+    border-collapse: collapse;
+    overflow-x: auto;
+}
+
+td, th {
+    padding: .3em .5em;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+}
+
+table[data-reader-layout-table],
+table[data-reader-layout-table] > tbody,
+table[data-reader-layout-table] > tbody > tr,
+table[data-reader-layout-table] > tbody > tr > td {
+    display: block;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+pre {
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+}
+
+hr {
+    border: 0;
+    border-top: 1px solid var(--rule);
+    margin: 1.6em 0;
+}
+
+mark[data-library-mark] {
+    background: var(--highlight);
+    color: var(--ink);
+    border-radius: 2px;
+}
+
+.source-credit {
+    margin-top: 2.2em;
+    padding-top: 1em;
+    border-top: 1px solid var(--rule);
+    font-size: .82em;
+}

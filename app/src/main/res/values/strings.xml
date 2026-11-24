@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">中文马克思主义文库</string>
+    <string name="about_title">关于</string>
+    <string name="about_description">独立维护的第三方 Android 阅读客户端。文献由所选站点提供，阅读记录保存在本机。</string>
+    <string name="about_project_license">项目许可证</string>
+    <string name="about_project_license_summary">源码和安装包的非商业使用条款</string>
+    <string name="about_disclaimer">免责声明</string>
+    <string name="about_disclaimer_summary">站点内容归属与客户端责任</string>
+    <string name="about_disclaimer_text">本应用是独立维护的第三方阅读客户端。文库名称用于标明资料来源。\n\n文库原站与镜像的运营，以及站内文献的收录、编辑、发布、更新和下架，由相应站点负责。文献观点归署名作者，站点公告和编辑说明归相应发布者。\n\n开发者负责客户端的技术实现与维护。自动排版、目录和脚注识别结果可能与原网页或出版物有差异。引用资料时请核对原文及对应版本。\n\n原站内容的更正或下架请联系对应站点。文献转载授权请向相应权利人确认。软件按现状提供，担保与责任范围见项目许可证第六节及适用法律。</string>
+    <string name="about_license_loading">正在载入项目许可证</string>
+    <string name="about_license_unavailable">暂时无法读取项目许可证</string>
+    <string name="about_project_home">项目主页</string>
+    <string name="about_project_home_summary">GitHub 源码与问题反馈</string>
+    <string name="about_archive_terms">站方使用条款与版权声明</string>
+    <string name="about_close">关闭</string>
+    <string name="app_update_title">检查应用更新</string>
+    <string name="app_update_summary">从 GitHub Releases 获取新版</string>
+    <string name="app_update_current_version">当前版本 %1$s</string>
+    <string name="app_update_checking">正在检查 GitHub 发布</string>
+    <string name="app_update_no_release">GitHub 暂无正式发布版本</string>
+    <string name="app_update_up_to_date">暂无比当前版本更新的正式发布</string>
+    <string name="app_update_github_version">GitHub 最新发布 %1$s</string>
+    <string name="app_update_available">发现新版 %1$s</string>
+    <string name="app_update_debug">调试版本可在 GitHub 查看正式安装包</string>
+    <string name="app_update_missing_apk">此版本暂无可直接下载的 APK，可打开 GitHub 查看</string>
+    <string name="app_update_retry">重新检查</string>
+    <string name="app_update_download">下载更新</string>
+    <string name="app_update_downloading">正在下载更新</string>
+    <string name="app_update_download_size">%1$s / %2$s</string>
+    <string name="app_update_verifying">正在校验安装包</string>
+    <string name="app_update_cancel">取消下载</string>
+    <string name="app_update_ready">新版 %1$s 已下载并通过校验</string>
+    <string name="app_update_install">安装更新</string>
+    <string name="app_update_open_github">打开 GitHub</string>
+    <string name="app_update_link_failed">设备没有可用的浏览器入口</string>
+    <style name="Theme.Library" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">#FBF8F2</item>
+        <item name="android:colorAccent">#8B3E36</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
+

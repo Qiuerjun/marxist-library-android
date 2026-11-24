@@ -1,0 +1,5 @@
+PDF.js 6.5.438 (Mozilla), from the official pdfjs-dist npm distribution.
+https://github.com/mozilla/pdf.js/releases/tag/v6.5.438
+Package SHA-512 (base64): vg8Pw1x+AFKy4AMDvhuWl5cOYV8d698UoEANoFFhc79hqXDnZQqnOXoxw3HG907WHOg1JYOvLhP756boddFxpA==
+The legacy build, viewer components, and local CJK/font/decoder resources enable offline reading.
+The document scripting and editing bundles are omitted. See the included licenses.

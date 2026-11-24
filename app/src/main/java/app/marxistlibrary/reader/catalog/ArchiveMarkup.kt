@@ -1,0 +1,258 @@
+package app.marxistlibrary.reader.catalog
+
+import app.marxistlibrary.reader.sources.ArchiveProblem
+import app.marxistlibrary.reader.sources.ArchiveRef
+import app.marxistlibrary.reader.sources.ConnectionIssue
+import app.marxistlibrary.reader.sources.MainSource
+import app.marxistlibrary.reader.sources.Source
+import app.marxistlibrary.reader.sources.WebReply
+import app.marxistlibrary.reader.sources.digest
+import kotlinx.serialization.Serializable
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import org.jsoup.nodes.TextNode
+import org.jsoup.safety.Cleaner
+import org.jsoup.safety.Safelist
+import java.io.ByteArrayInputStream
+import java.nio.charset.Charset
+
+enum class PageFormat { DIRECTORY, ARTICLE, PDF, EPUB }
+
+@Serializable
+data class Chapter(val ref: ArchiveRef, val title: String)
+
+private val PrintedPageRange = Regex("(?:…{2,}|[.．·]{4,})\\s*[0-9０-９]+(?:\\s*[-—–―−－]\\s*[0-9０-９]+)?\\s*$")
+
+internal fun String.chapterTitle(): String = replace(PrintedPageRange, "").trim()
+
+private val NavigationLabels = setOf(
+    "中文马克思主义文库", "返回", "返回目录", "回目录", "回到目录", "返回首页", "回首页", "主页",
+    "上一篇", "下一篇", "上一章", "下一章", "上一页", "下一页", "上一卷", "下一卷", "Back", "Home"
+)
+
+internal fun String.isNavigationLabel(): Boolean = this in NavigationLabels
+
+@Serializable
+data class Illustration(val path: String, val key: String, val extension: String, val caption: String)
+
+@Serializable
+data class Heading(val id: String, val title: String, val level: Int)
+
+private val FootnoteAnchor = Regex("(?i)^_?ftn(?:ref)?[0-9]+$")
+private val FootnoteLabel = Regex("[\\[［〔【(（]\\s*(?:注\\s*)?[0-9０-９]+\\s*[\\]］〕】)）]")
+private val FootnoteSuffix = Regex("\\s*${FootnoteLabel.pattern}$")
+private val HeadingSpace = Regex("[\\s\\u3000]+")
+
+// Downloaded editions may still have annotation links and duplicate named anchors in their saved contents.
+fun List<Heading>.readingHeadings(): List<Heading> {
+    val cleaned = mapNotNull { heading ->
+        val title = heading.title.trim()
+        if (FootnoteAnchor.matches(heading.id) || FootnoteLabel.matches(title)) return@mapNotNull null
+        val cleanTitle = title.replace(FootnoteSuffix, "").trim()
+        if (cleanTitle.isEmpty()) null else heading.copy(title = cleanTitle)
+    }.distinctBy { it.id }
+    fun label(heading: Heading) = heading.title.trimStart('Ø', '·', '•').replace(HeadingSpace, "")
+    val nativeTitles = cleaned.filter { it.id.startsWith("p-") }.mapTo(mutableSetOf(), ::label)
+    return cleaned.filter { it.id.startsWith("p-") || label(it) !in nativeTitles }
+}
+
+@Serializable
+data class PageDetails(
+    val chapters: List<Chapter> = emptyList(),
+    val illustrations: List<Illustration> = emptyList(),
+    val headings: List<Heading> = emptyList(),
+    val attribution: String = "",
+    val rights: String = "",
+    val downloadsAllowed: Boolean = true
+)
+
+data class ParsedPage(val title: String, val format: PageFormat, val html: String, val details: PageDetails)
+
+// Old MIA pages mix navigation, directories and text. Preserve each block's original position.
+object ArchiveMarkup {
+    private val cleaner = Cleaner(
+        Safelist.none()
+            .addTags(
+                "a", "abbr", "article", "aside", "b", "blockquote", "br", "caption", "cite", "code", "dd",
+                "del", "div", "dl", "dt", "em", "figcaption", "figure", "h1", "h2", "h3", "h4",
+                "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "section", "small",
+                "span", "strong", "sub", "sup", "table", "tbody", "td", "th", "thead", "tr", "u", "ul"
+            )
+            .addAttributes(":all", "id", "title", "lang", "role", "epub:type")
+            .addAttributes("p", "align")
+            .addAttributes("div", "align")
+            .addAttributes("a", "href", "name", "rel")
+            .addAttributes("img", "src", "alt", "width", "height")
+            .addAttributes("td", "colspan", "rowspan")
+            .addAttributes("th", "colspan", "rowspan", "scope")
+            .addAttributes("ol", "start")
+            .addProtocols("a", "href", "https", "http", "#")
+            .addProtocols("img", "src", "https", "http")
+            .preserveRelativeLinks(true)
+    )
+
+    fun parse(ref: ArchiveRef, source: Source, reply: WebReply): ParsedPage {
+        val document = decode(reply)
+        val body = document.body()
+        val text = body.text()
+        val title = title(document)
+        if (text.length < 16 || title.length < 2 || TroubleTitle.containsMatchIn(title)) {
+            throw ArchiveProblem(ConnectionIssue.WRONG_CONTENT)
+        }
+        val resolved = source.reference(reply.url) ?: throw ArchiveProblem(ConnectionIssue.WRONG_CONTENT)
+        if (resolved.path == "/chinese/" && ref.path != "/chinese/") {
+            throw ArchiveProblem(ConnectionIssue.WRONG_CONTENT)
+        }
+
+        val breadcrumbs = leadingBreadcrumbs(body, source, reply)
+        val chapters = body.select("a[href]").asSequence().mapNotNull { link ->
+            if (link in breadcrumbs || link.parents().any { it.tagName() == "nav" || it.attr("role") == "navigation" }) {
+                return@mapNotNull null
+            }
+            val raw = link.attr("href").trim()
+            if (raw.isEmpty() || raw.startsWith('#')) return@mapNotNull null
+            val target = reply.url.resolve(raw) ?: return@mapNotNull null
+            val linked = source.reference(target) ?: MainSource.reference(target) ?: return@mapNotNull null
+            val label = link.text().chapterTitle().take(180)
+            if (label.length < 2 || label.isNavigationLabel() || linked.path == ref.path ||
+                !supportedPath(linked.path) || isBreadcrumb(ref.path, linked.path)) return@mapNotNull null
+            Chapter(linked, label)
+        }.distinctBy { it.ref.key }.take(1_500).toList()
+
+        val substantial = body.select("p, blockquote, li").count { it.text().length >= 100 }
+        val index = ref.path.substringBefore('?').let { it.endsWith('/') || it.substringAfterLast('/').startsWith("index.") }
+        val directory = ref.path == "/chinese/" || (chapters.isNotEmpty() &&
+            (index && substantial < 5 || chapters.size >= 5 && substantial == 0 && text.length < 4_000))
+        val section = body.selectFirst("main, article, [role=main]") ?: body
+        val rights = body.select("footer, [class*=copyright], [id*=copyright]").text().take(800)
+        val attribution = document.selectFirst("meta[name=author]")?.attr("content").orEmpty()
+        section.select("script, style, form, nav, iframe, noscript, [class*=navigation], [id*=navbar]").remove()
+        // Legacy named anchors must survive cleaning so footnotes and source URLs still work.
+        section.select("a[name]").forEach { if (!it.hasAttr("id")) it.attr("id", it.attr("name")) }
+        section.select("center").forEach { it.tagName("div").attr("align", "center") }
+        val clean = cleaner.clean(Jsoup.parseBodyFragment(section.html(), reply.url.toString())).body()
+        val images = mutableListOf<Illustration>()
+        clean.select("img").forEach { image ->
+            val allowed = reply.url.resolve(image.attr("src"))?.let { source.reference(it) ?: MainSource.reference(it) }
+            val ext = allowed?.path?.substringBefore('?')?.substringAfterLast('.', "")?.lowercase()
+            if (allowed == null || ext == null || ext !in ImageTypes || images.size >= 100) {
+                image.after(TextNode(image.attr("alt")))
+                image.remove()
+            } else {
+                val key = digest("${source.id}:${allowed.path}")
+                val item = Illustration(allowed.path, key, ext, image.attr("alt").take(180))
+                images += item
+                image.attr("src", "/image/${item.key}.${item.extension}").attr("loading", "lazy")
+            }
+        }
+        clean.select("a[href]").forEach { anchor ->
+            val href = anchor.attr("href")
+            if (href.startsWith('#')) return@forEach
+            val resolvedUrl = reply.url.resolve(href)
+            val linked = resolvedUrl?.let { source.reference(it) ?: MainSource.reference(it) }
+            when {
+                linked != null && linked.path == ref.path && linked.anchor.isNotEmpty() -> anchor.attr("href", "#${linked.anchor}")
+                linked != null -> anchor.attr("href", linked.original)
+                resolvedUrl != null -> anchor.attr("href", resolvedUrl.toString())
+                else -> anchor.removeAttr("href")
+            }
+        }
+        val headings = indexBlocks(clean)
+        val namedSections = clean.select("a[href^=\"#\"]").mapNotNull { link ->
+            val id = link.attr("href").removePrefix("#")
+            val name = link.text()
+            if (name.length !in 2..110 || id.isEmpty() || FootnoteAnchor.matches(id) || FootnoteLabel.matches(name) ||
+                link.parents().any { it.tagName() == "sup" } || link.attr("role") == "doc-noteref" ||
+                clean.getElementById(id) == null) {
+                return@mapNotNull null
+            }
+            Heading(id, name, 2)
+        }
+        val details = PageDetails(chapters, images.distinctBy { it.key }, (headings + namedSections).readingHeadings(), attribution, rights,
+            !(rights.contains("禁止下载") || rights.contains("不得下载")))
+        return ParsedPage(title, if (directory) PageFormat.DIRECTORY else PageFormat.ARTICLE, clean.html(), details)
+    }
+
+    fun cleanBookPage(html: String, base: String): Document {
+        val document = Jsoup.parse(html, base)
+        document.select("script, style, form, iframe, noscript").remove()
+        val safe = cleaner.clean(document)
+        safe.select("a[name]:not([id])").forEach { it.attr("id", it.attr("name")) }
+        indexBlocks(safe.body())
+        return safe
+    }
+
+    fun supportedPath(path: String): Boolean = path.substringBefore('?').let {
+        it.endsWith('/') || it.substringAfterLast('/').let { filename ->
+            '.' !in filename || filename.substringAfterLast('.').lowercase() in DocumentTypes
+        }
+    }
+
+    private fun decode(reply: WebReply): Document {
+        val hint = reply.charset?.takeIf { runCatching { Charset.isSupported(it) }.getOrDefault(false) }
+        fun parse(charset: String?) = Jsoup.parse(ByteArrayInputStream(reply.bytes), charset, reply.url.toString())
+        val decoded = parse(hint)
+        if (decoded.body().text().count { it == '\uFFFD' } < 3) return decoded
+        return listOf(parse(null), parse("GB18030"), parse("Big5"))
+            .minBy { it.body().text().count { char -> char == '\uFFFD' } }
+    }
+
+    private fun title(document: Document): String {
+        val heading = document.select("h1").firstNotNullOfOrNull { node ->
+            node.text().takeIf { it.length in 2..130 && !it.isNavigationLabel() }
+        }
+        if (heading != null) return heading
+        val title = document.title().ifBlank { document.selectFirst("h2, h3, center")?.text().orEmpty() }
+        return title.removePrefix("中文马克思主义文库·").removePrefix("中文马克思主义文库 · ").trim().take(180)
+    }
+
+    private fun isBreadcrumb(owner: String, link: String): Boolean {
+        val parent = owner.substringBeforeLast('/') + "/"
+        val destination = link.substringBeforeLast('/') + "/"
+        return link == "/chinese/" || parent.startsWith(destination) && parent != destination
+    }
+
+    private fun leadingBreadcrumbs(body: Element, source: Source, reply: WebReply): Set<Element> {
+        val separator = body.selectFirst("hr") ?: return emptySet()
+        val links = generateSequence(separator.previousElementSibling()) { it.previousElementSibling() }
+            .takeWhile { it.tagName() in BreadcrumbTags }
+            .flatMap { it.select("a[href]").asSequence() }
+            .toSet()
+        val beginsWithArchive = links.size in 2..8 && links.any {
+            val url = reply.url.resolve(it.attr("href"))
+            url != null && (source.reference(url) ?: MainSource.reference(url))?.path == "/chinese/"
+        }
+        return if (beginsWithArchive) links else emptySet()
+    }
+
+    private fun indexBlocks(body: Element): List<Heading> {
+        val ids = mutableSetOf<String>()
+        body.select("[id]").forEach { node ->
+            val id = node.id()
+            if (id.isBlank() || !ids.add(id)) node.removeAttr("id")
+        }
+        val headings = mutableListOf<Heading>()
+        val blocks = body.select("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre, td, dt, dd, div")
+        blocks.forEach { node ->
+            val text = node.text().take(250)
+            if (text.isBlank() || (node.ownText().isBlank() && node.select("p, li, td, div").size > 1)) return@forEach
+            if (node.id().isBlank()) {
+                val base = "p-" + digest(text).take(14)
+                var id = base
+                var occurrence = 1
+                while (!ids.add(id)) id = "$base-${occurrence++}"
+                node.attr("id", id)
+            }
+            node.attr("data-reading-anchor", node.id())
+            val level = node.tagName().takeIf { it.length == 2 && it.startsWith('h') }?.last()?.digitToIntOrNull()
+            if (level != null) headings += Heading(node.id(), text, level)
+        }
+        return headings.take(400)
+    }
+
+    private val TroubleTitle = Regex("access denied|forbidden|not found|bad gateway|just a moment|登录|验证访问", RegexOption.IGNORE_CASE)
+    private val DocumentTypes = setOf("htm", "html", "shtml", "pdf", "epub")
+    private val ImageTypes = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "avif")
+    private val BreadcrumbTags = setOf("a", "b", "br", "i", "small", "span", "strong")
+}

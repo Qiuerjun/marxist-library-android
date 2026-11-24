@@ -1,0 +1,26 @@
+.gradle/
+.kotlin/
+.tooling/
+.idea/
+build/
+**/build/
+local.properties
+*.iml
+
+# Local credentials and signing keys.
+.env
+.env.*
+keystore.properties
+signing.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+*.pem
+
+# Built application packages belong in Releases.
+*.apk
+*.apks
+*.aab
+

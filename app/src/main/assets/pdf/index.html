@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; worker-src 'self'; font-src 'self' data: blob:; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'">
+    <title>PDF 阅读器</title>
+    <link rel="stylesheet" href="vendor/web/pdf_viewer.css">
+    <link rel="stylesheet" href="reader.css">
+    <script type="module" src="reader.mjs"></script>
+</head>
+<body>
+    <nav class="toolbar" aria-label="PDF 阅读工具">
+        <button data-ready id="contents" disabled>目录</button>
+        <button data-ready id="search" aria-controls="searchbar" aria-expanded="false" disabled>查找</button>
+    </nav>
+    <form id="searchbar" class="toolbar search" role="search" hidden>
+        <input id="query" type="search" placeholder="查找文字" aria-label="在 PDF 中查找" maxlength="160" enterkeyhint="search">
+        <button type="button" id="previous-result" class="icon" aria-label="上一个匹配">↑</button>
+        <button class="icon" aria-label="下一个匹配">↓</button>
+        <button type="button" id="close-search" class="icon" aria-label="关闭查找">×</button>
+        <output id="matches" aria-live="polite"></output>
+    </form>
+    <main>
+        <div id="viewerContainer" tabindex="0" aria-label="PDF 正文">
+            <div id="viewer" class="pdfViewer"></div>
+        </div>
+    </main>
+    <footer>
+        <div class="toolbar page-tools" aria-label="页码和缩放">
+            <button class="icon" id="previous" aria-label="上一页" disabled>‹</button>
+            <button id="page" aria-label="跳到指定页" data-ready disabled>页码</button>
+            <button class="icon" id="next" aria-label="下一页" disabled>›</button>
+            <span class="separator" aria-hidden="true"></span>
+            <button class="icon" id="zoom-out" data-ready aria-label="缩小" disabled>−</button>
+            <button id="fit" data-ready aria-label="切换适合宽度或整页" disabled>适宽</button>
+            <button class="icon" id="zoom-in" data-ready aria-label="放大" disabled>＋</button>
+        </div>
+        <div class="status" id="status" role="status" hidden></div>
+    </footer>
+    <dialog id="outline-dialog" aria-labelledby="outline-title">
+        <header>
+            <h2 id="outline-title">目录</h2>
+            <button class="icon" type="button" data-close aria-label="关闭目录">×</button>
+        </header>
+        <div id="outline" class="outline dialog-body"></div>
+    </dialog>
+    <dialog id="jump-dialog" aria-labelledby="jump-title">
+        <header>
+            <h2 id="jump-title">跳到指定页</h2>
+            <button class="icon" type="button" data-close aria-label="关闭跳页">×</button>
+        </header>
+        <form id="jump-form" class="dialog-body">
+            <label for="page-number" id="page-range">页码</label>
+            <input id="page-number" type="number" step="1" min="1" inputmode="numeric" enterkeyhint="go" required>
+            <button class="primary">跳转</button>
+        </form>
+    </dialog>
+    <dialog id="password-dialog" aria-labelledby="password-title">
+        <header><h2 id="password-title">打开受保护的 PDF</h2></header>
+        <form id="password-form" class="dialog-body">
+            <label for="password" id="password-label">请输入文档密码</label>
+            <input id="password" type="password" autocomplete="off" enterkeyhint="go" required>
+            <div class="toolbar dialog-actions">
+                <button id="cancel-password" type="button">取消</button>
+                <button class="primary">打开</button>
+            </div>
+        </form>
+    </dialog>
+</body>
+</html>

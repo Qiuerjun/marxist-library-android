@@ -1,0 +1,220 @@
+:root {
+    --paper: #fbf8f2;
+    --ink: #28231e;
+    --accent: #8b3e36;
+    --rule: #ddd1c2;
+    --surface: #eee8df;
+    color-scheme: light;
+    font: 16px/1.5 system-ui, sans-serif;
+}
+
+:root[data-theme="dark"] {
+    --surface: #28231f;
+    color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+    background: var(--paper);
+    color: var(--ink);
+    /* Anchor to the WebView viewport. Percentage heights can resolve to zero on Android. */
+    position: fixed;
+    inset: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    overflow: hidden;
+}
+
+.toolbar {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-width: 0;
+    margin: 0;
+    padding: 2px 6px;
+}
+
+nav.toolbar {
+    border-bottom: 1px solid var(--rule);
+    justify-content: space-evenly;
+}
+
+button, input { font: inherit; }
+
+button {
+    border: 0;
+    border-radius: 10px;
+    min-height: 44px;
+    padding: 6px 12px;
+    color: inherit;
+    background: transparent;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+button:disabled { opacity: .42; cursor: default; }
+button:not(:disabled):active { background: var(--surface); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.icon {
+    font-size: 1.45rem;
+    min-width: 44px;
+    padding: 0 5px;
+    line-height: 1;
+}
+
+.page-tools {
+    justify-content: safe center;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-inline: 4px;
+}
+
+.page-tools > * { flex-shrink: 0; }
+.page-tools #page { font-variant-numeric: tabular-nums; }
+.page-tools #fit { min-width: 54px; padding-inline: 5px; }
+.separator { height: 23px; border-inline-start: 1px solid var(--rule); }
+
+footer { border-top: 1px solid var(--rule); }
+
+main {
+    position: relative;
+    min-height: 0;
+    min-width: 0;
+    grid-row: 3;
+    background: var(--surface);
+}
+
+footer { grid-row: 4; min-width: 0; }
+
+#viewerContainer {
+    position: absolute;
+    inset: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    overflow-anchor: none;
+    outline: none;
+}
+
+#viewerContainer[data-swipe="true"] { touch-action: pan-y; }
+
+.pdfViewer.removePageBorders .page {
+    margin: 0 auto 10px;
+    box-shadow: 0 1px 7px #0002;
+    background: white;
+    color-scheme: light;
+}
+
+.pdfViewer .textLayer { user-select: text; -webkit-user-select: text; }
+
+.status {
+    text-align: center;
+    color: var(--ink);
+    font-size: .81rem;
+    padding: 0 8px 5px;
+}
+
+#searchbar {
+    grid-row: 2;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    border-bottom: 1px solid var(--rule);
+}
+
+input[type="search"], input[type="number"], input[type="password"] {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    min-height: 42px;
+    padding: 7px 10px;
+    color: var(--ink);
+}
+
+#query { flex: 1; min-width: 116px; width: 116px; }
+#matches { font-size: .8rem; margin-inline: 4px; }
+
+dialog[open] {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    display: flex;
+    flex-direction: column;
+    height: max-content;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 18px;
+    width: min(460px, calc(100vw - 24px));
+    max-height: min(700px, calc(100% - 20px));
+    padding: 0;
+    overflow: hidden;
+}
+
+dialog::backdrop { background: #1a141080; }
+
+dialog > header {
+    flex: none;
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 10px 4px 16px;
+    border-bottom: 1px solid var(--rule);
+}
+
+.dialog-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    padding: 10px 16px 16px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+}
+
+h2 { font-size: 1.15rem; margin: 0; }
+dialog form { display: grid; gap: 10px; }
+dialog form input { width: 100%; }
+
+.primary { background: var(--accent); color: var(--paper); font-weight: 600; }
+.primary:not(:disabled):active { background: var(--accent); opacity: .78; }
+.dialog-actions { justify-content: flex-end; }
+.outline button {
+    display: block;
+    min-height: 44px;
+    text-align: start;
+    width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    padding: 7px 8px 7px calc(8px + var(--level, 0) * 12px);
+}
+.outline .group { font-weight: 650; }
+.outline p { margin: 8px 0 12px; }
+.outline small { display: block; opacity: .76; margin-top: 3px; }
+
+.loading-line::before {
+    content: "";
+    display: inline-block;
+    width: 17px;
+    height: 17px;
+    border: 2px solid var(--rule);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    margin-inline-end: 10px;
+    vertical-align: middle;
+    animation: loading-rotation .82s linear infinite;
+}
+
+@keyframes loading-rotation { to { transform: rotate(1turn); } }
+
+@media (prefers-reduced-motion: reduce) {
+    .loading-line::before { animation: none; }
+}
