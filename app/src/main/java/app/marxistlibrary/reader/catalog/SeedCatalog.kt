@@ -2,6 +2,7 @@ package app.marxistlibrary.reader.catalog
 
 import android.content.Context
 import app.marxistlibrary.reader.CatalogEntry
+import app.marxistlibrary.reader.DirectoryLink
 import app.marxistlibrary.reader.search.ChineseText
 import app.marxistlibrary.reader.sources.ArchiveRef
 
@@ -27,13 +28,25 @@ class SeedCatalog(context: Context, private val chinese: ChineseText) {
         }
     }
 
+    private val links by lazy {
+        items.mapNotNull { item ->
+            ArchiveRef.parse(item.owner)?.let { DirectoryLink(item.entry.path, it.path, title(it.path).orEmpty()) }
+        }
+    }
+
     fun entries() = items.map(Item::entry).distinctBy(CatalogEntry::key)
+
+    fun directoryLinks() = links
+
+    fun parent(path: String): DirectoryLink? = links.firstOrNull { it.path == path }
 
     fun children(path: String): List<Chapter> = items.filter { it.owner == path }.map {
         Chapter(ArchiveRef(it.entry.path, it.entry.anchor), it.entry.title)
     }
 
     fun category(path: String) = items.firstOrNull { it.entry.path == path }?.entry?.category
+
+    fun isDirectory(path: String) = items.any { it.entry.path == path && it.entry.kind == "directory" }
 
     fun title(path: String) = items.firstOrNull { it.entry.path == path }?.entry?.title
 }

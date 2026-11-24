@@ -4,12 +4,14 @@ import android.net.Network
 import android.util.Xml
 import androidx.room.withTransaction
 import app.marxistlibrary.reader.CatalogEntry
+import app.marxistlibrary.reader.DirectoryLink
 import app.marxistlibrary.reader.LibraryDatabase
 import app.marxistlibrary.reader.Paragraph
 import app.marxistlibrary.reader.ParagraphMatch
 import app.marxistlibrary.reader.SavedPage
 import app.marxistlibrary.reader.UpdateEntry
 import app.marxistlibrary.reader.search.ChineseText
+import app.marxistlibrary.reader.settings.CoverStyle
 import app.marxistlibrary.reader.settings.Settings
 import app.marxistlibrary.reader.sources.ArchiveHttp
 import app.marxistlibrary.reader.sources.ArchiveProblem
@@ -68,12 +70,49 @@ class Archive(
     private val json = Json { ignoreUnknownKeys = true }
 
     suspend fun installSeed() = withContext(Dispatchers.IO) {
-        if (dao.catalogCount() == 0) dao.putCatalog(seeds.entries())
+        database.withTransaction {
+            dao.putSeedCatalog(seeds.entries())
+            if (dao.directoryLinkCount() == 0) {
+                dao.directoryPages().forEach { page ->
+                    recordDirectoryLinks(page.path, page.title, decode(page.metadata).chapters)
+                }
+            }
+            dao.putDirectoryLinks(seeds.directoryLinks())
+        }
     }
 
     fun seedEntries() = seeds.entries()
 
     fun seedPreview(ref: ArchiveRef): OpenPage? = seedPage(ref)
+
+    suspend fun documentFormats(paths: Set<String>): Map<String, PageFormat> = withContext(Dispatchers.IO) {
+        buildMap {
+            paths.chunked(400).forEach { group ->
+                dao.knownDirectories(group).forEach { path ->
+                    val inferred = PageFormat.fromPath(path)
+                    put(path, if (inferred == PageFormat.ARTICLE) PageFormat.DIRECTORY else inferred)
+                }
+                dao.savedFormats(group).forEach { item ->
+                    val stored = PageFormat.valueOf(item.format)
+                    put(item.path, if (stored == PageFormat.ARTICLE && seeds.isDirectory(item.path)) PageFormat.DIRECTORY else stored)
+                }
+            }
+        }
+    }
+
+    suspend fun directoryTrail(path: String, visitedFrom: List<String>): List<Chapter> = withContext(Dispatchers.IO) {
+        val ancestors = directoryAncestors(path, visitedFrom) { child ->
+            val recorded = dao.directoryParents(child).sortedBy { it.parent == LibraryDirectory.ref.path }
+            (listOfNotNull(seeds.parent(child)) + recorded).distinctBy { it.parent }
+        }.mapNotNull { link ->
+            if (link.parent == LibraryDirectory.ref.path) return@mapNotNull LibraryDirectory
+            val title = seeds.title(link.parent) ?: dao.entry(link.parent)?.title?.takeUnless { it.isNavigationLabel() }
+                ?: dao.page(link.parent)?.title ?: link.parentTitle
+            title.takeIf(String::isNotBlank)?.let { Chapter(ArchiveRef(link.parent), it) }
+        }
+        if (path == LibraryDirectory.ref.path || ancestors.firstOrNull() == LibraryDirectory) ancestors
+        else listOf(LibraryDirectory) + ancestors
+    }
 
     suspend fun open(
         ref: ArchiveRef,
@@ -93,11 +132,7 @@ class Archive(
                 return@withLock cached
             }
             val page = try {
-                val format = when (ref.path.substringBefore('?').substringAfterLast('.').lowercase()) {
-                    "pdf" -> PageFormat.PDF
-                    "epub" -> PageFormat.EPUB
-                    else -> null
-                }
+                val format = PageFormat.fromPath(ref.path).takeIf { it == PageFormat.PDF || it == PageFormat.EPUB }
                 if (format == null) withTimeout(16_000) {
                     fromSources(ref.path) {
                         progress(ArchiveProgress(ArchiveStage.CONNECT))
@@ -136,6 +171,37 @@ class Archive(
                     } ?: false
                 }
             }.awaitAll().any { it }
+        }
+    }
+
+    suspend fun coverFile(path: String): File? = withContext(Dispatchers.IO) {
+        if (settings.current().coverStyle == CoverStyle.TEXT) return@withContext null
+        val ref = ArchiveRef.parse(path) ?: return@withContext null
+        val extension = ref.path.substringBefore('?').substringAfterLast('.').lowercase()
+        if (extension in setOf("pdf", "epub") || !ArchiveMarkup.supportedPath(ref.path)) return@withContext null
+        val page = withTimeoutOrNull(6500) {
+            try {
+                open(ref)
+            } catch (_: ArchiveProblem) {
+                null
+            }
+        } ?: return@withContext null
+        coverFile(page)
+    }
+
+    suspend fun coverFile(page: OpenPage, network: Network? = null): File? = withContext(Dispatchers.IO) {
+        val cover = page.details.cover ?: return@withContext null
+        val file = files.image(cover.key, cover.extension)
+        if (file.isFile) return@withContext file
+        if (!mirrors.online()) return@withContext null
+        val source = mirrors.all().find { it.id == page.source } ?: MainSource
+        withTimeoutOrNull(6500) {
+            try {
+                fetchImage(source, cover, network)
+                file
+            } catch (_: ArchiveProblem) {
+                null
+            }
         }
     }
 
@@ -207,7 +273,7 @@ class Archive(
                         dao.removeParagraphs(page.path)
                         size -= page.size
                         retired += page.digest
-                        retired += decode(page.metadata).illustrations.map { it.key }
+                        retired += decode(page.metadata).imageKeys
                     }
                 }
             }
@@ -215,7 +281,7 @@ class Archive(
         val referenced = dao.pages()
         files.sweep(
             referenced.filter { it.format in setOf(PageFormat.DIRECTORY.name, PageFormat.ARTICLE.name) }.map { it.digest }.toSet(),
-            referenced.flatMap { decode(it.metadata).illustrations }.map { it.key }.toSet(),
+            referenced.flatMap { decode(it.metadata).imageKeys }.toSet(),
             referenced.filter { it.format in setOf(PageFormat.PDF.name, PageFormat.EPUB.name) }.map { it.digest }.toSet(),
             retired
         )
@@ -223,8 +289,8 @@ class Archive(
     }
 
     private fun fromLocal(ref: ArchiveRef, saved: SavedPage): OpenPage? {
-        val format = PageFormat.valueOf(saved.format)
-        if (!files.exists(format, saved.digest)) {
+        val storedFormat = PageFormat.valueOf(saved.format)
+        if (!files.exists(storedFormat, saved.digest)) {
             val affected = dao.relatedTasks(saved.path, saved.digest)
             dao.invalidateItems(saved.path, saved.digest, "文件缺失，点按重试")
             affected.mapNotNull(dao::task).forEach { task ->
@@ -234,9 +300,17 @@ class Archive(
             dao.removeParagraphs(saved.path)
             return null
         }
-        val file = if (format == PageFormat.PDF || format == PageFormat.EPUB) files.attachment(saved.digest, format)
-            else files.body(saved.digest)
-        return OpenPage(ref, saved.title, format, decode(saved.metadata), saved.origin, saved.digest, file,
+        val attachment = storedFormat == PageFormat.PDF || storedFormat == PageFormat.EPUB
+        val file = if (attachment) files.attachment(saved.digest, storedFormat) else files.body(saved.digest)
+        val stored = decode(saved.metadata)
+        val details = if (attachment) stored else ArchiveMarkup.upgradeDetails(stored, file::readText)
+        val format = if (storedFormat == PageFormat.ARTICLE &&
+            ArchiveMarkup.isListedDirectory(ref.path, details.chapters, seeds.isDirectory(ref.path))) PageFormat.DIRECTORY else storedFormat
+        if (details !== stored || format != storedFormat) {
+            if (format != storedFormat) recordDirectoryLinks(ref.path, saved.title, details.chapters)
+            dao.putPage(saved.copy(format = format.name, metadata = json.encodeToString(details)))
+        }
+        return OpenPage(ref, saved.title, format, details, saved.origin, saved.digest, file,
             dao.isPinned(saved.path, saved.digest))
     }
 
@@ -257,7 +331,7 @@ class Archive(
         if (reply.unchanged) return previous?.let { fromLocal(ref, it) }
             ?: throw ArchiveProblem(ConnectionIssue.WRONG_CONTENT)
         progress(ArchiveProgress(ArchiveStage.PARSE))
-        val parsed = ArchiveMarkup.parse(ref, source, reply)
+        val parsed = ArchiveMarkup.parse(ref, source, reply, seeds.isDirectory(ref.path))
         val entry = dao.entry(ref.path)
         val expected = entry?.takeIf { it.kind == "document" }?.title?.let(chinese::fold)
         val actual = chinese.fold(parsed.title)
@@ -273,9 +347,25 @@ class Archive(
             source.id, reply.tag, reply.modified, now, now, file.length())
         database.withTransaction {
             dao.putPage(row)
+            val ancestry = parsed.parents.zipWithNext { parent, child ->
+                DirectoryLink(child.ref.path, parent.ref.path, parent.title)
+            } + listOfNotNull(parsed.parents.lastOrNull()?.let { parent ->
+                DirectoryLink(ref.path, parent.ref.path, parent.title)
+            })
+            if (ancestry.isNotEmpty()) dao.putDirectoryLinks(ancestry)
+            if (parsed.format == PageFormat.DIRECTORY) {
+                recordDirectoryLinks(ref.path, entry?.title ?: parsed.title, parsed.details.chapters)
+            }
             if (parsed.details.chapters.isNotEmpty()) saveLinks(ref, parsed, entry)
         }
         return OpenPage(ref, parsed.title, parsed.format, parsed.details, source.id, digest, file)
+    }
+
+    private fun recordDirectoryLinks(path: String, title: String, chapters: List<Chapter>) {
+        val links = chapters.map { it.ref.path }.distinct()
+            .filter { it != path && it != LibraryDirectory.ref.path }
+            .map { DirectoryLink(it, path, title) }
+        if (links.isNotEmpty()) dao.putDirectoryLinks(links)
     }
 
     private fun saveLinks(ref: ArchiveRef, page: ParsedPage, parent: CatalogEntry?) {
@@ -323,10 +413,11 @@ class Archive(
         if (!page.details.downloadsAllowed) throw ArchiveProblem(ConnectionIssue.REJECTED)
         val source = mirrors.all().find { it.id == page.source } ?: MainSource
         coroutineScope {
-            page.details.illustrations.map { illustration ->
+            page.details.illustrations.filterNot { it.key == page.details.cover?.key }.map { illustration ->
                 async { fetchImage(source, illustration, network) }
             }.awaitAll()
         }
+        coverFile(page, network)
     }
 
     private suspend fun fetchImage(source: Source, illustration: Illustration, network: Network?) = imageSlots.withPermit {

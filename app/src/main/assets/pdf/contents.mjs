@@ -5,7 +5,8 @@ export async function showContents(pdf, panel, jump) {
     panel.replaceChildren(waiting);
     const bookmarks = await pdf.getOutline().catch(() => null) || [];
     const result = document.createDocumentFragment();
-    addBookmarks(result, bookmarks, jump, 0);
+    const entries = [];
+    addBookmarks(result, bookmarks, jump, entries, 0);
     if (result.childNodes.length < 14) {
         const parsed = await printedContents(pdf, bookmarks).catch(() => null);
         if (parsed?.entries.length) {
@@ -14,6 +15,7 @@ export async function showContents(pdf, panel, jump) {
             result.append(label);
             for (const entry of parsed.entries) {
                 const button = document.createElement("button");
+                const item = { button, page: entry.page };
                 button.textContent = entry.title;
                 const page = document.createElement("small");
                 page.textContent = "书内第 " + entry.printed + " 页";
@@ -22,12 +24,14 @@ export async function showContents(pdf, panel, jump) {
                     button.disabled = true;
                     try {
                         const physical = await confirmedPage(pdf, entry.printed, entry.page);
+                        if (physical) item.page = physical;
                         jump({ page: physical || parsed.page });
                     } finally {
                         button.disabled = false;
                     }
                 });
                 result.append(button);
+                entries.push(item);
             }
         } else if (parsed?.page && !result.childNodes.length) {
             result.append(note("此 PDF 未提供书签目录。"));
@@ -38,6 +42,24 @@ export async function showContents(pdf, panel, jump) {
         }
     }
     panel.replaceChildren(result.childNodes.length ? result : note("此 PDF 未提供可跳转的目录。可使用底部页码跳转。"));
+    // Resolve bookmark pages after showing the rows so large outlines remain tappable while loading.
+    const indexed = entries.filter(entry => entry.dest != null);
+    for (let start = 0; start < indexed.length; start += 16) {
+        await Promise.all(indexed.slice(start, start + 16).map(async entry => {
+            entry.page = await destinationPage(pdf, entry.dest).catch(() => null);
+        }));
+    }
+    let active = null;
+    return function locate(number) {
+        const here = entries.reduce((latest, entry) =>
+            entry.page > 0 && entry.page <= number && (!latest || latest.page <= entry.page) ? entry : latest, null);
+        if (active !== here) {
+            active?.button.removeAttribute("aria-current");
+            here?.button.setAttribute("aria-current", "location");
+            active = here;
+        }
+        here?.button.scrollIntoView({ block: "nearest" });
+    };
 }
 
 async function printedContents(pdf, bookmarks) {
@@ -161,7 +183,7 @@ function compact(text) {
     return text.normalize("NFKC").replace(/\s+/g, "");
 }
 
-function addBookmarks(container, bookmarks, jump, depth) {
+function addBookmarks(container, bookmarks, jump, entries, depth) {
     if (depth > 12) return;
     for (const entry of bookmarks) {
         const title = entry.title.trim().slice(0, 320);
@@ -171,13 +193,14 @@ function addBookmarks(container, bookmarks, jump, depth) {
             button.style.setProperty("--level", Math.min(depth, 6));
             button.addEventListener("click", () => jump({ dest: entry.dest }));
             container.append(button);
+            entries.push({ button, dest: entry.dest });
         } else if (title && entry.items.length) {
             const heading = note(title);
             heading.className = "group";
             heading.style.paddingInlineStart = Math.min(depth, 6) * 12 + "px";
             container.append(heading);
         }
-        addBookmarks(container, entry.items, jump, depth + 1);
+        addBookmarks(container, entry.items, jump, entries, depth + 1);
     }
 }
 

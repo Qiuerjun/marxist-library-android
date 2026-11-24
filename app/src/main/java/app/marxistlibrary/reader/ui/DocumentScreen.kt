@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -30,26 +31,30 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.marxistlibrary.reader.CatalogEntry
 import app.marxistlibrary.reader.DocumentRoute
 import app.marxistlibrary.reader.LibraryModel
-import app.marxistlibrary.reader.catalog.Chapter
 import app.marxistlibrary.reader.catalog.ArchiveProgress
 import app.marxistlibrary.reader.catalog.ArchiveStage
+import app.marxistlibrary.reader.catalog.Chapter
+import app.marxistlibrary.reader.catalog.LibraryDirectory
 import app.marxistlibrary.reader.catalog.OpenPage
 import app.marxistlibrary.reader.catalog.PageFormat
 import app.marxistlibrary.reader.openWebsite
-import app.marxistlibrary.reader.reader.AttachmentScreen
 import app.marxistlibrary.reader.reader.ArticleScreen
+import app.marxistlibrary.reader.reader.AttachmentScreen
+import app.marxistlibrary.reader.settings.CoverStyle
 import app.marxistlibrary.reader.shareText
 import app.marxistlibrary.reader.sources.ArchiveRef
 import kotlinx.coroutines.CancellationException
@@ -62,12 +67,15 @@ fun DocumentScreen(
     back: () -> Unit,
     open: (DocumentRoute) -> Unit,
     replace: (DocumentRoute) -> Unit,
+    openDirectory: (DocumentRoute) -> Unit,
     settings: () -> Unit,
     download: (Int) -> Unit
 ) {
     val context = LocalContext.current
     var reload by remember { mutableStateOf(0) }
-    var page by remember(route) { mutableStateOf(if (route.textOnly) null else model.archive.seedPreview(route.ref)) }
+    var page by remember(route) {
+        mutableStateOf(if (route.textOnly || route.anchor.isNotBlank()) null else model.archive.seedPreview(route.ref))
+    }
     var entry by remember(route) { mutableStateOf<CatalogEntry?>(null) }
     var siblings by remember(route.parent) { mutableStateOf(emptyList<Chapter>()) }
     var problem by remember(route) { mutableStateOf<String?>(null) }
@@ -152,28 +160,40 @@ fun DocumentScreen(
     when {
         current.format == PageFormat.PDF || current.format == PageFormat.EPUB ->
             AttachmentScreen(model, current, route, back, { addDownloads(current) }, { toggleFavorite(current) }, favorite)
-        current.format == PageFormat.ARTICLE || route.textOnly && current.file != null ->
+        current.format == PageFormat.ARTICLE || (route.textOnly || route.anchor.isNotBlank()) && current.file != null ->
             ArticleScreen(model, current, route, siblings, back, ::sibling, open, { addDownloads(current) },
                 { toggleFavorite(current) }, favorite)
         else -> {
             val independent = entry?.category == "作者" || route.path == "/chinese/" || entry?.category == "专题"
+            val trail by produceState(
+                if (route.path == LibraryDirectory.ref.path) emptyList() else listOf(LibraryDirectory), route, current.digest
+            ) {
+                value = model.archive.directoryTrail(route.path, route.ancestors + route.parent)
+            }
+            val ancestorPaths = trail.map { it.ref.path }
+            fun childRoute(chapter: Chapter) = DocumentRoute(
+                chapter.ref.path, chapter.ref.anchor, if (independent) chapter.ref.path else route.edition,
+                current.ref.path, chapter.title, ancestors = ancestorPaths
+            )
             DirectoryPage(
-                page = current, title = entry?.title ?: current.title, author = entry?.author.orEmpty(),
+                model = model, page = current, title = entry?.title ?: current.title, author = entry?.author.orEmpty(),
                 back = back, favorite = favorite, toggleFavorite = { toggleFavorite(current) },
                 refresh = { reload++ }, progress = progress, problem = problem,
-                openChapter = { chapter ->
-                    open(DocumentRoute(chapter.ref.path, chapter.ref.anchor, if (independent) chapter.ref.path else route.edition,
-                        current.ref.path, chapter.title))
+                trail = trail,
+                openAncestor = { index ->
+                    val step = trail[index]
+                    openDirectory(DocumentRoute(step.ref.path, title = step.title, parent = ancestorPaths.getOrNull(index - 1).orEmpty(),
+                        ancestors = ancestorPaths.take((index - 1).coerceAtLeast(0))))
                 },
+                openChapter = { open(childRoute(it)) },
                 openLatest = {
                     model.action {
                         val latest = model.library.mostRecent(route.edition)
                         if (latest != null && latest.path != current.ref.path) {
-                            open(DocumentRoute.from(latest).copy(parent = current.ref.path))
+                            open(DocumentRoute.from(latest).copy(parent = current.ref.path, ancestors = ancestorPaths))
                         } else {
                             current.chapters.firstOrNull()?.let {
-                                open(DocumentRoute(it.ref.path, it.ref.anchor, if (independent) it.ref.path else route.edition,
-                                    current.ref.path, it.title))
+                                open(childRoute(it))
                             }
                         }
                     }
@@ -187,19 +207,23 @@ fun DocumentScreen(
 
 @Composable
 private fun DirectoryPage(
-    page: OpenPage, title: String, author: String, back: () -> Unit, favorite: Boolean, toggleFavorite: () -> Unit,
-    refresh: () -> Unit, progress: ArchiveProgress?, problem: String?, openChapter: (Chapter) -> Unit,
+    model: LibraryModel, page: OpenPage, title: String, author: String, back: () -> Unit, favorite: Boolean, toggleFavorite: () -> Unit,
+    refresh: () -> Unit, progress: ArchiveProgress?, problem: String?, trail: List<Chapter>, openAncestor: (Int) -> Unit,
+    openChapter: (Chapter) -> Unit,
     openLatest: () -> Unit, readPage: () -> Unit, download: (List<Chapter>) -> Unit
 ) {
     val context = LocalContext.current
+    val preferences by model.preferences.collectAsStateWithLifecycle()
+    val cover = if (preferences.coverStyle == CoverStyle.SOURCE_IMAGE) sourceCover(model.archive, page.ref.path, page) else null
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selected by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var filter by rememberSaveable { mutableStateOf("") }
     val shown = page.chapters.filter { it.title.contains(filter.trim(), ignoreCase = true) }
     val details: @Composable () -> Unit = {
         Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            if (trail.isNotEmpty()) DirectoryBreadcrumbs(trail, title, openAncestor)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                BookCover(title, Modifier.size(width = 89.dp, height = 110.dp), warm = true)
+                BookCover(title, Modifier.size(width = 89.dp, height = 110.dp), warm = true, cover = cover)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text(title, style = MaterialTheme.typography.headlineMedium)
                     if (author.isNotBlank()) Text(author, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -269,5 +293,20 @@ private fun DirectoryPage(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DirectoryBreadcrumbs(trail: List<Chapter>, title: String, openAncestor: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
+        trail.forEachIndexed { index, step ->
+            TextButton(onClick = { openAncestor(index) }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Text(step.title, Modifier.widthIn(max = 180.dp), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelLarge)
+            }
+            GlyphIcon(Glyph.NEXT, size = 12.dp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(title, Modifier.padding(start = 8.dp).widthIn(max = 220.dp), maxLines = 1, overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

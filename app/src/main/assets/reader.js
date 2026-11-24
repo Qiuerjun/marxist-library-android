@@ -5,13 +5,16 @@
     var notes = window.readerNotes;
     var noteReturn = null;
     var illustrationsReady = false;
+    var sections = [];
+    var sectionJump = null;
+    var readingEdge = 24;
 
     function normalized(text) {
         return text.replace(/\s+/g, ' ').trim();
     }
 
     function currentBlock() {
-        var edge = Math.min(8, window.innerHeight / 5);
+        var edge = Math.min(readingEdge, window.innerHeight / 5);
         var hit = document.elementFromPoint(window.innerWidth / 2, edge);
         var block = hit && hit.closest('[data-reading-anchor]');
         if (block) return block;
@@ -32,15 +35,24 @@
         var block = currentBlock();
         if (!block) return {anchor: '', quote: '', offset: 0};
         var bounds = block.getBoundingClientRect();
-        var y = Math.max(1, Math.min(8, window.innerHeight - 1, bounds.bottom - 1));
-        var probe = bounds.top < -4 && document.caretRangeFromPoint
+        var y = Math.max(1, Math.min(readingEdge, window.innerHeight - 1, bounds.bottom - 1));
+        var probe = bounds.top < 0 && document.caretRangeFromPoint
             ? document.caretRangeFromPoint(bounds.left + 2, y) : null;
         var offset = probe ? offsetInside(block, probe.startContainer, probe.startOffset) : 0;
         return {anchor: block.id, quote: normalized(block.textContent).slice(0, 90), offset: offset};
     }
 
+    function fragment(value) {
+        try { return decodeURIComponent(value); } catch (_) { return value; }
+    }
+
+    function anchorNode(id) {
+        return document.getElementById(id) || document.getElementById(fragment(id)) ||
+            Array.from(document.getElementsByName(fragment(id))).find(function (node) { return node.tagName === 'A'; });
+    }
+
     function target(location) {
-        var identified = location.anchor ? document.getElementById(location.anchor) : null;
+        var identified = location.anchor ? anchorNode(location.anchor) : null;
         var quote = normalized(location.quote || '');
         if (identified && (!quote || normalized(identified.textContent).indexOf(quote) !== -1)) return identified;
         if (!quote) return null;
@@ -48,16 +60,46 @@
         return matches.length === 1 ? matches[0] : null;
     }
 
+    function landing(node) {
+        // Named anchors often sit on a blank line separated from their heading by a horizontal rule.
+        if (!node.matches('a, span') || node.childElementCount || normalized(node.textContent)) return node;
+        var parent = node.parentElement;
+        var marker = parent && parent.matches('p, div') && !normalized(parent.textContent) ? parent : node;
+        for (var next = marker.nextSibling; next; next = next.nextSibling) {
+            if (next.nodeType === Node.TEXT_NODE && normalized(next.nodeValue)) break;
+            if (next.nodeType !== Node.ELEMENT_NODE || next.matches('br, hr') ||
+                (!normalized(next.textContent) && !next.matches('img, table'))) continue;
+            return next;
+        }
+        return node;
+    }
+
+    function setContents(ids) {
+        sections = ids.map(function (id) {
+            var node = anchorNode(id);
+            return node && {id: id, node: landing(node)};
+        }).filter(Boolean).sort(function (left, right) {
+            if (left.node === right.node) return 0;
+            return left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_PRECEDING ? 1 : -1;
+        });
+    }
+
     function scrollToAnchor(location) {
+        sectionJump = null;
         if (!location.anchor && !location.quote) {
             window.scrollTo(0, 0);
             return true;
         }
         var block = target(location);
         if (!block) return false;
-        block.scrollIntoView({block: 'start', behavior: 'auto'});
+        var destination = landing(block);
+        destination.scrollIntoView({block: 'start', inline: 'nearest', behavior: 'auto'});
         var left = location.offset || 0;
-        if (!left) return true;
+        if (!left) {
+            var section = sections.find(function (item) { return item.id === location.anchor || item.node === destination; });
+            if (section && !location.quote) sectionJump = {section: section, y: window.scrollY};
+            return true;
+        }
         var walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
         var node;
         while ((node = walker.nextNode())) {
@@ -78,7 +120,18 @@
     }
 
     function snapshot() {
-        return {anchor: locate(), y: window.scrollY, width: window.innerWidth,
+        var y = window.scrollY;
+        if (sectionJump && Math.abs(y - sectionJump.y) > 1) sectionJump = null;
+        var section = sectionJump && sectionJump.section;
+        var anchor = section ? {anchor: section.id, quote: '', offset: 0} : locate();
+        if (!section) {
+            for (var index = sections.length - 1; index >= 0; index--) {
+                if (sections[index].node.getBoundingClientRect().top > readingEdge) continue;
+                section = sections[index];
+                break;
+            }
+        }
+        return {anchor: anchor, section: section ? section.id : '', y: y, width: window.innerWidth,
             height: document.documentElement.scrollHeight, viewport: window.innerHeight};
     }
 
@@ -86,7 +139,7 @@
         var place = noteReturn || snapshot();
         var max = Math.max(0, place.height - place.viewport);
         var progress = max === 0 || place.y >= max - 1 ? 100 : Math.floor(100 * place.y / max);
-        return Object.assign({}, place.anchor, {progress: progress, atFootnote: noteReturn !== null});
+        return Object.assign({}, place.anchor, {section: place.section, progress: progress, atFootnote: noteReturn !== null});
     }
 
     function jumpToFootnote(index) {
@@ -192,19 +245,30 @@
         image.addEventListener('error', function () {
             if (illustrationsReady) retryImage(image);
         });
+        image.addEventListener('load', function () {
+            if (!sectionJump || noteReturn || Math.abs(window.scrollY - sectionJump.y) > 1) return;
+            sectionJump.section.node.scrollIntoView({block: 'start', inline: 'nearest'});
+            sectionJump.y = window.scrollY;
+        });
     });
     document.addEventListener('click', function (event) {
         var link = event.target.closest('a[href^="#"]');
-        if (link && noteReturn) {
+        if (!link || event.defaultPrevented || event.ctrlKey || event.metaKey) return;
+        if (noteReturn) {
             if (notes.returnsToText(noteReturn.index, link)) {
                 event.preventDefault();
                 returnFromFootnote();
-            } else noteReturn = null;
+                return;
+            }
+            noteReturn = null;
         }
+        var id = fragment(link.getAttribute('href').slice(1));
+        if (id && scrollToAnchor({anchor: id})) event.preventDefault();
     });
 
     window.archiveReader = {
         position: readPosition,
+        contents: setContents,
         go: function (location) {
             noteReturn = null;
             return scrollToAnchor(location);
@@ -227,7 +291,7 @@
             var reflow = changes.some(function (name) {
                 return ['size', 'spacing', 'margin', 'face', 'paragraph-gap', 'first-indent', 'measure'].indexOf(name) !== -1;
             });
-            var place = keepPosition && reflow && !noteReturn ? locate() : null;
+            var place = keepPosition && reflow && !noteReturn ? snapshot().anchor : null;
             changes.forEach(function (name) { root.setProperty('--' + name, values[name]); });
             if (noteReturn && reflow) {
                 noteReturn.width = 0;

@@ -197,6 +197,7 @@ dialog form input { width: 100%; }
     padding: 7px 8px 7px calc(8px + var(--level, 0) * 12px);
 }
 .outline .group { font-weight: 650; }
+.outline button[aria-current] { background: var(--accent); color: var(--paper); font-weight: 650; }
 .outline p { margin: 8px 0 12px; }
 .outline small { display: block; opacity: .76; margin-top: 3px; }
 

@@ -16,7 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -49,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -62,7 +63,6 @@ import app.marxistlibrary.reader.ReadingPosition
 import app.marxistlibrary.reader.catalog.Chapter
 import app.marxistlibrary.reader.catalog.Heading
 import app.marxistlibrary.reader.catalog.OpenPage
-import app.marxistlibrary.reader.catalog.readingHeadings
 import app.marxistlibrary.reader.openWebsite
 import app.marxistlibrary.reader.shareText
 import app.marxistlibrary.reader.ui.AppearanceOptions
@@ -71,7 +71,6 @@ import app.marxistlibrary.reader.ui.Glyph
 import app.marxistlibrary.reader.ui.IconAction
 import app.marxistlibrary.reader.ui.LoadingPanel
 import app.marxistlibrary.reader.ui.LocalReaderColors
-import app.marxistlibrary.reader.ui.MessagePanel
 import app.marxistlibrary.reader.ui.SectionTitle
 import app.marxistlibrary.reader.ui.SliderSetting
 import app.marxistlibrary.reader.ui.Toolbar
@@ -87,15 +86,17 @@ fun ArticleScreen(
     favorite: () -> Unit, saved: Boolean
 ) {
     val context = LocalContext.current
-    val html by produceState<String?>(null, page.digest) {
-        value = withContext(Dispatchers.IO) {
-            val name = TextUtils.htmlEncode(page.title)
-            val address = TextUtils.htmlEncode(page.ref.original)
-            val attribution = TextUtils.htmlEncode(page.details.attribution)
-            val rights = TextUtils.htmlEncode(page.details.rights)
-            page.file?.takeIf { it.isFile }?.readText()?.plus(
-                """<div class="source-credit"><p>来源 <a href="$address">Marxists Internet Archive</a></p><p>$name $attribution $rights</p></div>"""
-            )
+    val html by key(page.ref.path, page.digest) {
+        produceState<String?>(null) {
+            value = withContext(Dispatchers.IO) {
+                val name = TextUtils.htmlEncode(page.title)
+                val address = TextUtils.htmlEncode(page.ref.original)
+                val attribution = TextUtils.htmlEncode(page.details.attribution)
+                val rights = TextUtils.htmlEncode(page.details.rights)
+                page.file?.takeIf { it.isFile }?.readText()?.plus(
+                    """<div class="source-credit"><p>来源 <a href="$address">Marxists Internet Archive</a></p><p>$name $attribution $rights</p></div>"""
+                )
+            }
         }
     }
     val illustrations = remember(page.digest) { page.details.illustrations.associateBy { "${it.key}.${it.extension}" } }
@@ -155,7 +156,7 @@ fun TextReader(
     val currentSettings by rememberUpdatedState(preferences)
     val currentColors by rememberUpdatedState(colors)
     val currentLink by rememberUpdatedState(onLink)
-    val contents = remember(headings) { headings.readingHeadings() }
+    val contents = headings
     val marks by remember(model, route.path) { model.library.marks(route.path) }.collectAsStateWithLifecycle(initialValue = emptyList())
     val localMarks = remember(marks, anchorPrefix) {
         marks.filter { it.anchor.startsWith(anchorPrefix) }.map { it.copy(anchor = it.anchor.removePrefix(anchorPrefix)) }
@@ -180,6 +181,12 @@ fun TextReader(
     var location by remember(route, page.digest, anchorPrefix) { mutableStateOf<ReaderLocation?>(null) }
     var leaving by remember(route, page.digest, anchorPrefix) { mutableStateOf(false) }
     var speaker by remember { mutableStateOf<Speech?>(null) }
+    val activeSection = contents.indexOfFirst { it.id == location?.section }
+    val activeChapter = siblings.indexOfFirst {
+        if (anchorPrefix.isEmpty()) it.ref.key == route.ref.key else it.ref.anchor == anchorPrefix
+    }.takeIf { it >= 0 } ?: siblings.indexOfFirst { anchorPrefix.isEmpty() && it.ref.path == route.path }
+    val currentLabel = contents.getOrNull(activeSection)?.title ?: siblings.getOrNull(activeChapter)?.title
+        ?: if (contents.isEmpty()) "正文" else "正文开头"
 
     fun record(anchor: TextAnchor, at: Long = System.currentTimeMillis()) =
         ReadingPosition(route.edition, route.path, title, page.digest, anchorPrefix + anchor.id, anchor.quote, anchor.offset, at)
@@ -214,6 +221,13 @@ fun TextReader(
             }
         }
     }
+
+    fun jump(heading: Heading) {
+        val web = browser ?: return
+        web.go(TextAnchor(heading.id)) { found ->
+            if (found) sheet = "" else model.notice("找不到此目录项对应的正文位置")
+        }
+    }
     BackHandler {
         when {
             location?.atFootnote == true -> browser?.returnFromFootnote()
@@ -240,6 +254,14 @@ fun TextReader(
     LaunchedEffect(browser, colors, preferences, fontScale) { browser?.appearance(colors, preferences, fontScale) }
     LaunchedEffect(browser, localMarks) { browser?.updateMarks(localMarks) }
     LaunchedEffect(browser, reloadImages) { if (reloadImages) browser?.retryImages() }
+    val settledAnchor = location?.anchor
+    LaunchedEffect(route, page.digest, anchorPrefix, settledAnchor) {
+        if (settledAnchor != null) {
+            val position = record(settledAnchor)
+            delay(450)
+            model.library.save(position)
+        }
+    }
     LaunchedEffect(speaker, preferences.speechRate) { speaker?.rate(preferences.speechRate) }
     LaunchedEffect(browser, query, searching) {
         if (!searching || query.isBlank()) {
@@ -293,15 +315,8 @@ fun TextReader(
             else Row(Modifier.fillMaxSize()) {
                 if (!immersive && wide && (contents.isNotEmpty() || siblings.isNotEmpty())) {
                     Surface(Modifier.width(265.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
-                        LazyColumn(contentPadding = PaddingValues(13.dp)) {
-                            item { SectionTitle("目录") }
-                            items(contents, key = { it.id }) { heading ->
-                                EntryRow(heading.title, icon = Glyph.TOC) { browser?.go(TextAnchor(heading.id)) }
-                            }
-                            items(siblings, key = { "book-" + it.ref.key }) { chapter ->
-                                EntryRow(chapter.title) { capture { openChapter(chapter) } }
-                            }
-                        }
+                        ReaderContents(contents, siblings, activeSection, activeChapter, PaddingValues(13.dp),
+                            ::jump) { capture { openChapter(it) } }
                     }
                 }
                 key(route, page.digest, anchorPrefix) {
@@ -309,20 +324,16 @@ fun TextReader(
                         factory = { ctx ->
                             ReaderWeb(ctx, title, html, asset,
                                 onLink = { uri -> capture { currentLink(uri) } },
-                                onPosition = { value ->
-                                    val previousLocation = location
-                                    location = value
-                                    if (previousLocation?.anchor != value.anchor) {
-                                        val position = record(value.anchor)
-                                        model.action { model.library.save(position) }
-                                    }
-                                },
+                                onPosition = { location = it },
                                 onFootnote = { footnote = it },
                                 onSelection = ::mark,
                                 onReady = { opened ->
                                     opened.appearance(currentColors, currentSettings, fontScale, keepPosition = false)
+                                    opened.contents(contents.map { it.id })
                                     opened.go(start) { ok ->
-                                        if (!ok && (start.id.isNotBlank() || start.quote.isNotBlank())) model.notice("已定位到章节开头")
+                                        if (!ok && (start.id.isNotBlank() || start.quote.isNotBlank())) {
+                                            model.notice("找不到原定位，已打开正文开头")
+                                        }
                                     }
                                     browser = opened
                                 },
@@ -347,10 +358,16 @@ fun TextReader(
         if (immersive) {
             TextButton(onClick = { immersive = false }, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("显示阅读工具") }
         } else {
+            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(currentLabel, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                readingLocation?.let { Text("${it.progress}%", style = MaterialTheme.typography.labelMedium) }
+            }
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 7.dp),
                 horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconAction(Glyph.BACK, "上一章", previous != null) { previous?.let { capture(it) } }
-                TextButton(onClick = { sheet = "contents" }) { Text("目录") }
+                TextButton(onClick = { sheet = "contents" }, enabled = browser != null) { Text("目录") }
                 TextButton(onClick = { sheet = "appearance" }) { Text("排版") }
                 TextButton(onClick = {
                     if (speaker == null) speaker = Speech(context) { browser?.go(TextAnchor(it)) }
@@ -362,15 +379,10 @@ fun TextReader(
     }
     if (sheet.isNotEmpty()) ModalBottomSheet(onDismissRequest = { sheet = "" }) {
         when (sheet) {
-            "contents" -> LazyColumn(contentPadding = PaddingValues(start = 19.dp, end = 19.dp, bottom = 30.dp)) {
-                item { SectionTitle("目录") }
-                items(contents, key = { it.id }) { item ->
-                    EntryRow(item.title, icon = Glyph.TOC) { browser?.go(TextAnchor(item.id)); sheet = "" }
-                }
-                items(siblings, key = { "chapter-" + it.ref.key }) { item ->
-                    EntryRow(item.title, icon = Glyph.BOOK) { sheet = ""; capture { openChapter(item) } }
-                }
-                if (contents.isEmpty() && siblings.isEmpty()) item { Text("这一页没有章节标题") }
+            "contents" -> ReaderContents(contents, siblings, activeSection, activeChapter,
+                PaddingValues(start = 19.dp, end = 19.dp, bottom = 30.dp), ::jump) { chapter ->
+                sheet = ""
+                capture { openChapter(chapter) }
             }
             "appearance" -> Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 22.dp, end = 22.dp, bottom = 28.dp)) {
                 SectionTitle("阅读排版")
@@ -440,5 +452,37 @@ fun TextReader(
             }) { Text("保存") } },
             dismissButton = { TextButton(onClick = { note = null }) { Text("取消") } }
         )
+    }
+}
+
+@Composable
+private fun ReaderContents(
+    headings: List<Heading>, chapters: List<Chapter>, activeSection: Int, activeChapter: Int, padding: PaddingValues,
+    jump: (Heading) -> Unit, open: (Chapter) -> Unit
+) {
+    val selectedRow = when {
+        activeSection >= 0 -> 1 + activeSection
+        activeChapter >= 0 -> 1 + headings.size + activeChapter
+        else -> 0
+    }
+    val scroll = rememberLazyListState(initialFirstVisibleItemIndex = (selectedRow - 1).coerceAtLeast(0))
+    LaunchedEffect(selectedRow) {
+        if (selectedRow > 0 && !scroll.isScrollInProgress && scroll.layoutInfo.visibleItemsInfo.none { it.index == selectedRow }) {
+            scroll.scrollToItem(selectedRow - 1)
+        }
+    }
+    LazyColumn(state = scroll, contentPadding = padding) {
+        item { SectionTitle("目录") }
+        items(headings.size, key = { "section-" + headings[it].id }) { index ->
+            val heading = headings[index]
+            val active = index == activeSection
+            EntryRow(heading.title, if (active) "当前阅读位置" else "", Glyph.TOC, current = active) { jump(heading) }
+        }
+        items(chapters.size, key = { "chapter-" + chapters[it].ref.key }) { index ->
+            val chapter = chapters[index]
+            val active = activeSection < 0 && index == activeChapter
+            EntryRow(chapter.title, if (active) "当前阅读位置" else "", current = active) { open(chapter) }
+        }
+        if (headings.isEmpty() && chapters.isEmpty()) item { Text("这一页没有章节标题") }
     }
 }

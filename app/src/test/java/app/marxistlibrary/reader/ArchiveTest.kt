@@ -1,9 +1,8 @@
 package app.marxistlibrary.reader
 
 import app.marxistlibrary.reader.catalog.ArchiveMarkup
-import app.marxistlibrary.reader.catalog.Heading
 import app.marxistlibrary.reader.catalog.PageFormat
-import app.marxistlibrary.reader.catalog.readingHeadings
+import app.marxistlibrary.reader.catalog.directoryAncestors
 import app.marxistlibrary.reader.search.ChineseText
 import app.marxistlibrary.reader.sources.ArchiveHttp
 import app.marxistlibrary.reader.sources.ArchiveProblem
@@ -83,6 +82,7 @@ class ArchiveTest {
         val index = """
             <html><head><title>阅读测试目录</title></head><body>
             <a href="/chinese/">中文马克思主义文库</a> → <a href="/chinese/author/index.htm">作者</a>
+            相关链接：<a href="/chinese/other/index.htm">相关作品</a>
             <hr><h1>阅读测试目录</h1>
             <a href="1.htm">第一章……47―101</a><a href="1.htm">热键重复链接</a>
             <a href="2.htm#sub">第二章甲</a><a href="2.htm#next">第二章乙</a>
@@ -92,16 +92,91 @@ class ArchiveTest {
         val ref = ArchiveRef("/chinese/sample/index.htm")
         val result = ArchiveMarkup.parse(ref, MainSource, response(ref, index))
         assertEquals(PageFormat.DIRECTORY, result.format)
+        assertEquals(listOf("/chinese/", "/chinese/author/index.htm"), result.parents.map { it.ref.path })
         assertEquals(listOf("/chinese/sample/1.htm", "/chinese/sample/2.htm#sub", "/chinese/sample/2.htm#next"),
             result.details.chapters.map { it.ref.key })
         assertEquals("第一章", result.details.chapters.first().title)
     }
 
     @Test
-    fun cachedContentsHidesOriginalNoteLinksAndRepeatedSectionAliases() {
-        val headings = listOf(Heading("p-section", "正文小节[13]", 3), Heading("section", "正文小节", 2),
-            Heading("_ftn13", "[13]", 2), Heading("_ftnref13", "[13]", 2), Heading("appendix", "附录", 2))
-        assertEquals(listOf(Heading("p-section", "正文小节", 3), Heading("appendix", "附录", 2)), headings.readingHeadings())
+    fun directoryTrailKeepsTheOpenedBranchAndStopsAtCycles() {
+        val root = "/chinese/"
+        val topic = "/chinese/topic.htm"
+        val related = "/chinese/related.htm"
+        val book = "/chinese/book/index.htm"
+        val chapter = "/chinese/book/part/index.htm"
+        val links = listOf(
+            DirectoryLink(chapter, book, "文集"),
+            DirectoryLink(book, topic, "专题"),
+            DirectoryLink(book, related, "参考文献"),
+            DirectoryLink(topic, root, "文库"),
+            DirectoryLink(related, root, "文库"),
+            DirectoryLink(topic, book, "文集")
+        ).groupBy { it.path }
+        fun parents(path: String) = links[path].orEmpty()
+        assertEquals(listOf(root, related, book),
+            directoryAncestors(chapter, listOf(root, related, book), ::parents).map { it.parent })
+        assertEquals(listOf(root, topic, book), directoryAncestors(chapter, emptyList(), ::parents).map { it.parent })
+    }
+
+    @Test
+    fun anIndexWithLongIntroductionsStillOpensAsADirectory() {
+        val ref = ArchiveRef("/chinese/sample/index-topic.htm")
+        val page = "<title>专题索引页</title>" +
+            (1..8).joinToString("") { """<p><a href="$it.htm">专题条目 $it</a></p>""" } +
+            (1..6).joinToString("") { "<p>${"本段是目录中每个主题的导言。".repeat(25)}</p>" }
+        val parsed = ArchiveMarkup.parse(ref, MainSource, response(ref, page))
+        assertEquals(PageFormat.DIRECTORY, parsed.format)
+        assertEquals(8, parsed.details.chapters.size)
+    }
+
+    @Test
+    fun contentsFollowTheTextAndKeepRepeatedHeadingsAtDifferentLocations() {
+        val ref = ArchiveRef("/chinese/test.htm")
+        val result = ArchiveMarkup.parse(ref, MainSource, response(ref, """
+            <title>章节测试</title>
+            <a href="#late">另一处小节</a><a href="#%E4%B8%AD%E9%97%B4">中间一节</a><a href="#alias">带日期的小节链接</a>
+            <a name="alias"></a><br><hr><h2>正文小节<sup><a href="#_ftn13">[13]</a></sup></h2>
+            <p>第一处正文内容，用来核对页面内链接的位置。</p>
+            <p><a id="中间"></a>中间段落的实际正文。</p>
+            <h2 id="late">正文小节</h2>
+            <a name="_ftn13"></a><p>这里是正文的脚注。</p>
+        """.trimIndent()))
+        assertEquals(listOf("正文小节", "中间一节", "正文小节"), result.details.headings.map { it.title })
+        assertEquals(listOf("中间", "late"), result.details.headings.drop(1).map { it.id })
+        assertTrue(result.html.contains("id=\"alias\""))
+        val old = result.details.copy(headings = emptyList(), markupVersion = 0)
+        assertEquals(result.details, ArchiveMarkup.upgradeDetails(old) { result.html })
+    }
+
+    @Test
+    fun usesCoverCaptionFromLegacyHtmlAndIgnoresOutsidePreviewImages() {
+        val ref = ArchiveRef("/chinese/samples/book.htm")
+        val parsed = ArchiveMarkup.parse(ref, MainSource, response(ref, """
+            <title>历史文献</title>
+            <meta property="og:image" content="https://example.net/chinese/fake.jpg">
+            <img src="site-logo.png" width="200" height="250">
+            <center><img src="1.jpg"><br>书籍封面</center>
+            <center><img src="cover.jpg"><br>封底</center>
+            <p>这是一篇带有原书封面图和其它插图的文献。</p>
+        """.trimIndent()))
+        assertEquals("/chinese/samples/1.jpg", parsed.details.cover?.path)
+        assertEquals(parsed.details.cover, ArchiveMarkup.upgradeDetails(parsed.details.copy(cover = null, markupVersion = 0)) {
+            parsed.html
+        }.cover)
+    }
+
+    @Test
+    fun keepsDeclaredSameSourceCoversSeparateFromOrdinaryIllustrations() {
+        val ref = ArchiveRef("/chinese/samples/story.htm")
+        val body = "<title>一篇文章</title><p>这里有一段用来验证图文识别的正文。</p><img src='chart.jpg' width='500' height='220'>"
+        val plain = ArchiveMarkup.parse(ref, MainSource, response(ref, body))
+        assertNull(plain.details.cover)
+        val described = ArchiveMarkup.parse(ref, MainSource, response(ref,
+            "<meta property='og:image' content='scan.jpg'>$body"))
+        assertEquals("/chinese/samples/scan.jpg", described.details.cover?.path)
+        assertEquals("/chinese/samples/chart.jpg", described.details.illustrations.single().path)
+        assertEquals(2, described.details.imageKeys.size)
     }
 
     @Test

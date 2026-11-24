@@ -342,7 +342,7 @@ function findCount({ current, total }) {
 const outlineDialog = element("outline-dialog");
 const jumpDialog = element("jump-dialog");
 document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
-element("contents").addEventListener("click", () => {
+element("contents").addEventListener("click", async () => {
     outlineDialog.showModal();
     outline ||= showContents(publication, element("outline"), async ({ page, dest }) => {
         outlineDialog.close();
@@ -351,6 +351,8 @@ element("contents").addEventListener("click", () => {
         refresh();
         reportPosition();
     }).catch(() => { element("outline").textContent = "暂时无法读取目录。可使用底部页码跳转。"; outline = null; });
+    const locate = await outline;
+    if (outlineDialog.open) locate?.(readingPage());
 });
 element("page").addEventListener("click", () => {
     const field = element("page-number");

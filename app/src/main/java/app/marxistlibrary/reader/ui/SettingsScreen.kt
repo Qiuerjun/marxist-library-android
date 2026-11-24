@@ -45,6 +45,7 @@ import app.marxistlibrary.reader.DocumentRoute
 import app.marxistlibrary.reader.LibraryModel
 import app.marxistlibrary.reader.library.LibraryBackup
 import app.marxistlibrary.reader.settings.Appearance
+import app.marxistlibrary.reader.settings.CoverStyle
 import app.marxistlibrary.reader.settings.ReadingSettings
 import app.marxistlibrary.reader.settings.ReadingWidth
 import app.marxistlibrary.reader.sources.ConnectionIssue
@@ -122,6 +123,14 @@ fun SettingsScreen(model: LibraryModel, back: () -> Unit, open: (DocumentRoute) 
             item("theme") {
                 SectionTitle("外观与排版")
                 AppearanceOptions(prefs.appearance) { value -> model.action { model.settings.appearance(value) } }
+                Text("封面样式", Modifier.padding(top = 10.dp), style = MaterialTheme.typography.titleMedium)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CoverStyle.entries.forEach { style ->
+                        FilterChip(selected = prefs.coverStyle == style,
+                            onClick = { model.action { model.settings.coverStyle(style) } },
+                            label = { Text(style.label) })
+                    }
+                }
                 TypographyOptions(model, prefs)
             }
             item("mirror") {

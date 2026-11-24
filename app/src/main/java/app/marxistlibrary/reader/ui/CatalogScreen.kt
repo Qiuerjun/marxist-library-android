@@ -46,6 +46,7 @@ import app.marxistlibrary.reader.DocumentRoute
 import app.marxistlibrary.reader.LibraryModel
 import app.marxistlibrary.reader.ReadingPosition
 import app.marxistlibrary.reader.openWebsite
+import app.marxistlibrary.reader.settings.CoverStyle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.time.Instant
@@ -119,7 +120,7 @@ fun CatalogScreen(model: LibraryModel, open: (DocumentRoute) -> Unit, search: ()
                 }
                 if (recent != null || recommendation != null) {
                     item("featured") {
-                        Featured(recent, recommendation) {
+                        Featured(model, recent, recommendation, preferences.coverStyle) {
                             if (recent != null) open(DocumentRoute.from(recent)) else recommendation?.let { open(it.route()) }
                         }
                     }
@@ -178,12 +179,17 @@ fun CatalogScreen(model: LibraryModel, open: (DocumentRoute) -> Unit, search: ()
 }
 
 @Composable
-private fun Featured(position: ReadingPosition?, recommendation: CatalogEntry?, onOpen: () -> Unit) {
+private fun Featured(
+    model: LibraryModel, position: ReadingPosition?, recommendation: CatalogEntry?, coverStyle: CoverStyle, onOpen: () -> Unit
+) {
     val title = position?.title ?: recommendation?.title.orEmpty()
+    val cover = if (coverStyle == CoverStyle.SOURCE_IMAGE) {
+        sourceCover(model.archive, position?.path ?: recommendation?.path.orEmpty())
+    } else null
     Surface(onClick = onOpen, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
         color = MaterialTheme.colorScheme.primaryContainer) {
         Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-            BookCover(title, Modifier.size(91.dp, 113.dp))
+            BookCover(title, Modifier.size(91.dp, 113.dp), cover = cover)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 Text(if (position != null) "继续阅读" else "经典文献", style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary)

@@ -11,13 +11,35 @@ import kotlinx.serialization.Serializable
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
 import org.jsoup.safety.Cleaner
 import org.jsoup.safety.Safelist
 import java.io.ByteArrayInputStream
+import java.net.URLDecoder
 import java.nio.charset.Charset
 
-enum class PageFormat { DIRECTORY, ARTICLE, PDF, EPUB }
+enum class PageFormat(val label: String) {
+    DIRECTORY("目录"), ARTICLE("HTML 正文"), PDF("PDF"), EPUB("EPUB");
+
+    companion object {
+        fun fromPath(path: String): PageFormat {
+            val bare = path.substringBefore('?')
+            return when {
+                bare.endsWith(".pdf", ignoreCase = true) -> PDF
+                bare.endsWith(".epub", ignoreCase = true) -> EPUB
+                isIndexPath(bare) -> DIRECTORY
+                else -> ARTICLE
+            }
+        }
+    }
+}
+
+private fun isIndexPath(path: String): Boolean {
+    val bare = path.substringBefore('?')
+    val last = bare.substringAfterLast('/')
+    return bare.endsWith('/') || last.startsWith("index.") || last.startsWith("index-")
+}
 
 @Serializable
 data class Chapter(val ref: ArchiveRef, val title: String)
@@ -42,19 +64,11 @@ data class Heading(val id: String, val title: String, val level: Int)
 private val FootnoteAnchor = Regex("(?i)^_?ftn(?:ref)?[0-9]+$")
 private val FootnoteLabel = Regex("[\\[［〔【(（]\\s*(?:注\\s*)?[0-9０-９]+\\s*[\\]］〕】)）]")
 private val FootnoteSuffix = Regex("\\s*${FootnoteLabel.pattern}$")
-private val HeadingSpace = Regex("[\\s\\u3000]+")
 
-// Downloaded editions may still have annotation links and duplicate named anchors in their saved contents.
-fun List<Heading>.readingHeadings(): List<Heading> {
-    val cleaned = mapNotNull { heading ->
-        val title = heading.title.trim()
-        if (FootnoteAnchor.matches(heading.id) || FootnoteLabel.matches(title)) return@mapNotNull null
-        val cleanTitle = title.replace(FootnoteSuffix, "").trim()
-        if (cleanTitle.isEmpty()) null else heading.copy(title = cleanTitle)
-    }.distinctBy { it.id }
-    fun label(heading: Heading) = heading.title.trimStart('Ø', '·', '•').replace(HeadingSpace, "")
-    val nativeTitles = cleaned.filter { it.id.startsWith("p-") }.mapTo(mutableSetOf(), ::label)
-    return cleaned.filter { it.id.startsWith("p-") || label(it) !in nativeTitles }
+private fun Heading.cleaned(): Heading? {
+    val label = title.trim()
+    if (FootnoteAnchor.matches(id) || FootnoteLabel.matches(label) || label.isNavigationLabel()) return null
+    return label.replace(FootnoteSuffix, "").trim().takeIf(String::isNotEmpty)?.let { copy(title = it) }
 }
 
 @Serializable
@@ -64,13 +78,22 @@ data class PageDetails(
     val headings: List<Heading> = emptyList(),
     val attribution: String = "",
     val rights: String = "",
-    val downloadsAllowed: Boolean = true
-)
+    val downloadsAllowed: Boolean = true,
+    val cover: Illustration? = null,
+    val markupVersion: Int = 0
+) {
+    val imageKeys: List<String> get() = illustrations.map { it.key } + listOfNotNull(cover?.key)
+}
 
-data class ParsedPage(val title: String, val format: PageFormat, val html: String, val details: PageDetails)
+data class ParsedPage(
+    val title: String, val format: PageFormat, val html: String, val details: PageDetails,
+    val parents: List<Chapter> = emptyList()
+)
 
 // Old MIA pages mix navigation, directories and text. Preserve each block's original position.
 object ArchiveMarkup {
+    private const val MarkupVersion = 1
+    private const val HeadingTags = "h1,h2,h3,h4,h5,h6"
     private val cleaner = Cleaner(
         Safelist.none()
             .addTags(
@@ -92,7 +115,8 @@ object ArchiveMarkup {
             .preserveRelativeLinks(true)
     )
 
-    fun parse(ref: ArchiveRef, source: Source, reply: WebReply): ParsedPage {
+    @JvmOverloads
+    fun parse(ref: ArchiveRef, source: Source, reply: WebReply, knownDirectory: Boolean = false): ParsedPage {
         val document = decode(reply)
         val body = document.body()
         val text = body.text()
@@ -106,6 +130,14 @@ object ArchiveMarkup {
         }
 
         val breadcrumbs = leadingBreadcrumbs(body, source, reply)
+        val parentTrail = breadcrumbs.take(1) + breadcrumbs.drop(1).takeWhile(::followsBreadcrumbSeparator)
+        val parents = parentTrail.mapNotNull { link ->
+            val destination = reply.url.resolve(link.attr("href")) ?: return@mapNotNull null
+            val parent = (source.reference(destination) ?: MainSource.reference(destination)) ?: return@mapNotNull null
+            val label = link.text().take(180)
+            if (parent.path == ref.path || parent.path == resolved.path || label.isBlank()) null
+            else Chapter(parent.copy(anchor = ""), label)
+        }.distinctBy { it.ref.path }
         val chapters = body.select("a[href]").asSequence().mapNotNull { link ->
             if (link in breadcrumbs || link.parents().any { it.tagName() == "nav" || it.attr("role") == "navigation" }) {
                 return@mapNotNull null
@@ -115,18 +147,28 @@ object ArchiveMarkup {
             val target = reply.url.resolve(raw) ?: return@mapNotNull null
             val linked = source.reference(target) ?: MainSource.reference(target) ?: return@mapNotNull null
             val label = link.text().chapterTitle().take(180)
-            if (label.length < 2 || label.isNavigationLabel() || linked.path == ref.path ||
+            if (label.length < 2 || label.isNavigationLabel() || linked.path == ref.path || linked.path == resolved.path ||
                 !supportedPath(linked.path) || isBreadcrumb(ref.path, linked.path)) return@mapNotNull null
             Chapter(linked, label)
         }.distinctBy { it.ref.key }.take(1_500).toList()
 
         val substantial = body.select("p, blockquote, li").count { it.text().length >= 100 }
-        val index = ref.path.substringBefore('?').let { it.endsWith('/') || it.substringAfterLast('/').startsWith("index.") }
-        val directory = ref.path == "/chinese/" || (chapters.isNotEmpty() &&
-            (index && substantial < 5 || chapters.size >= 5 && substantial == 0 && text.length < 4_000))
+        val directory = isListedDirectory(ref.path, chapters, knownDirectory) || (chapters.isNotEmpty() &&
+            (isIndexPath(ref.path) && substantial < 5 || chapters.size >= 5 && substantial == 0 && text.length < 4_000))
         val section = body.selectFirst("main, article, [role=main]") ?: body
         val rights = body.select("footer, [class*=copyright], [id*=copyright]").text().take(800)
         val attribution = document.selectFirst("meta[name=author]")?.attr("content").orEmpty()
+        fun illustration(raw: String, caption: String = ""): Illustration? {
+            if (raw.isBlank()) return null
+            val address = reply.url.resolve(raw) ?: return null
+            val path = (source.reference(address) ?: MainSource.reference(address))?.path ?: return null
+            val ext = path.substringBefore('?').substringAfterLast('.', "").lowercase()
+            if (ext !in ImageTypes || address.username.isNotEmpty() || address.password.isNotEmpty()) return null
+            return Illustration(path, digest("${source.id}:$path"), ext, caption.take(180))
+        }
+        val declaredCover = ArchiveCover.declared(document).firstNotNullOfOrNull { raw ->
+            illustration(raw)?.takeIf { ArchiveCover.eligible(it.path) }
+        }
         section.select("script, style, form, nav, iframe, noscript, [class*=navigation], [id*=navbar]").remove()
         // Legacy named anchors must survive cleaning so footnotes and source URLs still work.
         section.select("a[name]").forEach { if (!it.hasAttr("id")) it.attr("id", it.attr("name")) }
@@ -134,14 +176,11 @@ object ArchiveMarkup {
         val clean = cleaner.clean(Jsoup.parseBodyFragment(section.html(), reply.url.toString())).body()
         val images = mutableListOf<Illustration>()
         clean.select("img").forEach { image ->
-            val allowed = reply.url.resolve(image.attr("src"))?.let { source.reference(it) ?: MainSource.reference(it) }
-            val ext = allowed?.path?.substringBefore('?')?.substringAfterLast('.', "")?.lowercase()
-            if (allowed == null || ext == null || ext !in ImageTypes || images.size >= 100) {
+            val item = illustration(image.attr("src"), image.attr("alt"))
+            if (item == null || images.size >= 100) {
                 image.after(TextNode(image.attr("alt")))
                 image.remove()
             } else {
-                val key = digest("${source.id}:${allowed.path}")
-                val item = Illustration(allowed.path, key, ext, image.attr("alt").take(180))
                 images += item
                 image.attr("src", "/image/${item.key}.${item.extension}").attr("loading", "lazy")
             }
@@ -152,26 +191,74 @@ object ArchiveMarkup {
             val resolvedUrl = reply.url.resolve(href)
             val linked = resolvedUrl?.let { source.reference(it) ?: MainSource.reference(it) }
             when {
-                linked != null && linked.path == ref.path && linked.anchor.isNotEmpty() -> anchor.attr("href", "#${linked.anchor}")
+                resolvedUrl != null && linked != null && (linked.path == ref.path || linked.path == resolved.path) && linked.anchor.isNotEmpty() ->
+                    anchor.attr("href", "#${resolvedUrl.encodedFragment}")
                 linked != null -> anchor.attr("href", linked.original)
                 resolvedUrl != null -> anchor.attr("href", resolvedUrl.toString())
                 else -> anchor.removeAttr("href")
             }
         }
-        val headings = indexBlocks(clean)
-        val namedSections = clean.select("a[href^=\"#\"]").mapNotNull { link ->
-            val id = link.attr("href").removePrefix("#")
-            val name = link.text()
-            if (name.length !in 2..110 || id.isEmpty() || FootnoteAnchor.matches(id) || FootnoteLabel.matches(name) ||
-                link.parents().any { it.tagName() == "sup" } || link.attr("role") == "doc-noteref" ||
-                clean.getElementById(id) == null) {
-                return@mapNotNull null
+        indexBlocks(clean)
+        val illustrations = images.distinctBy { it.key }
+        val details = PageDetails(chapters, illustrations, contents(clean), attribution, rights,
+            !(rights.contains("禁止下载") || rights.contains("不得下载")),
+            declaredCover ?: ArchiveCover.find(clean, illustrations), MarkupVersion)
+        return ParsedPage(title, if (directory) PageFormat.DIRECTORY else PageFormat.ARTICLE, clean.html(), details, parents)
+    }
+
+    internal fun isListedDirectory(path: String, chapters: List<Chapter>, knownDirectory: Boolean): Boolean {
+        val namedIndex = path.substringBefore('?').substringAfterLast('/').startsWith("index-")
+        return path == LibraryDirectory.ref.path ||
+            chapters.isNotEmpty() && (knownDirectory || namedIndex && chapters.size >= 8)
+    }
+
+    // Stored bodies already contain stable reading anchors. Reuse them when upgrading metadata.
+    fun upgradeDetails(details: PageDetails, html: () -> String): PageDetails {
+        if (details.markupVersion >= MarkupVersion) return details
+        val body = Jsoup.parseBodyFragment(html()).body()
+        return details.copy(headings = contents(body), cover = ArchiveCover.find(body, details.illustrations),
+            markupVersion = MarkupVersion)
+    }
+
+    fun contents(body: Element): List<Heading> {
+        val nodes = body.select("[id],a[name]")
+        val byId = nodes.filter { it.id().isNotEmpty() }.associateBy { it.id() }
+        val names = nodes.filter { it.hasAttr("name") }.associateBy { it.attr("name") }
+        val sections = HashMap<Element, Heading>()
+        nodes.forEach { node ->
+            if (node.`is`(HeadingTags) && node.id().length in 1..500) {
+                Heading(node.id(), node.text().take(250), node.tagName().last().digitToInt()).cleaned()
+                    ?.let { sections[node] = it }
             }
-            Heading(id, name, 2)
         }
-        val details = PageDetails(chapters, images.distinctBy { it.key }, (headings + namedSections).readingHeadings(), attribution, rights,
-            !(rights.contains("禁止下载") || rights.contains("不得下载")))
-        return ParsedPage(title, if (directory) PageFormat.DIRECTORY else PageFormat.ARTICLE, clean.html(), details)
+        body.select("a[href^=\"#\"]:not(sup a):not([role=doc-noteref])").forEach { link ->
+            val name = link.text()
+            if (name.length !in 2..180) return@forEach
+            val raw = link.attr("href").substring(1)
+            val decoded = runCatching { URLDecoder.decode(raw.replace("+", "%2B"), Charsets.UTF_8.name()) }
+                .getOrDefault(raw)
+            val node = byId[decoded] ?: byId[raw] ?: names[decoded] ?: names[raw] ?: return@forEach
+            val id = node.id().ifEmpty { node.attr("name") }
+            if (id.length !in 1..500 || FootnoteAnchor.matches(id)) return@forEach
+            val section = node.closest(HeadingTags) ?: headingAfter(node) ?: node
+            if (section !in sections) {
+                Heading(id, name, 2).cleaned()?.let { sections[section] = it }
+            }
+        }
+        return nodes.mapNotNull(sections::get).take(400)
+    }
+
+    private fun headingAfter(marker: Element): Element? {
+        if (marker.hasText() || !marker.`is`("a, span")) return null
+        val container = marker.parent()?.takeIf { it.`is`("p, div") && !it.hasText() } ?: marker
+        val next = generateSequence(container.nextSibling()) { it.nextSibling() }.firstOrNull { sibling ->
+            when (sibling) {
+                is TextNode -> !sibling.isBlank
+                is Element -> sibling.hasText() || sibling.`is`("img, table") || sibling.selectFirst("img") != null
+                else -> false
+            }
+        }
+        return (next as? Element)?.takeIf { it.`is`(HeadingTags) }
     }
 
     fun cleanBookPage(html: String, base: String): Document {
@@ -213,26 +300,37 @@ object ArchiveMarkup {
         return link == "/chinese/" || parent.startsWith(destination) && parent != destination
     }
 
-    private fun leadingBreadcrumbs(body: Element, source: Source, reply: WebReply): Set<Element> {
-        val separator = body.selectFirst("hr") ?: return emptySet()
+    private fun leadingBreadcrumbs(body: Element, source: Source, reply: WebReply): List<Element> {
+        val separator = body.selectFirst("hr") ?: return emptyList()
         val links = generateSequence(separator.previousElementSibling()) { it.previousElementSibling() }
             .takeWhile { it.tagName() in BreadcrumbTags }
-            .flatMap { it.select("a[href]").asSequence() }
-            .toSet()
+            .toList().asReversed().flatMap { it.select("a[href]") }
         val beginsWithArchive = links.size in 2..8 && links.any {
             val url = reply.url.resolve(it.attr("href"))
             url != null && (source.reference(url) ?: MainSource.reference(url))?.path == "/chinese/"
         }
-        return if (beginsWithArchive) links else emptySet()
+        return if (beginsWithArchive) links else emptyList()
     }
 
-    private fun indexBlocks(body: Element): List<Heading> {
+    private fun followsBreadcrumbSeparator(link: Element): Boolean {
+        val separator = generateSequence<Node>(link) { it.parent() }
+            .mapNotNull { it.previousSibling() }.firstOrNull { sibling ->
+                sibling !is TextNode || !sibling.isBlank
+            }
+        val text = when (separator) {
+            is TextNode -> separator.text()
+            is Element -> separator.text()
+            else -> ""
+        }
+        return text.trim() in setOf("->", "→", ">", "＞", "›", "»")
+    }
+
+    private fun indexBlocks(body: Element) {
         val ids = mutableSetOf<String>()
         body.select("[id]").forEach { node ->
             val id = node.id()
             if (id.isBlank() || !ids.add(id)) node.removeAttr("id")
         }
-        val headings = mutableListOf<Heading>()
         val blocks = body.select("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre, td, dt, dd, div")
         blocks.forEach { node ->
             val text = node.text().take(250)
@@ -245,10 +343,7 @@ object ArchiveMarkup {
                 node.attr("id", id)
             }
             node.attr("data-reading-anchor", node.id())
-            val level = node.tagName().takeIf { it.length == 2 && it.startsWith('h') }?.last()?.digitToIntOrNull()
-            if (level != null) headings += Heading(node.id(), text, level)
         }
-        return headings.take(400)
     }
 
     private val TroubleTitle = Regex("access denied|forbidden|not found|bad gateway|just a moment|登录|验证访问", RegexOption.IGNORE_CASE)

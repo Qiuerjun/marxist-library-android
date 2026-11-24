@@ -34,7 +34,7 @@ data class TextAnchor(val id: String = "", val quote: String = "", val offset: I
 
 data class ReaderSelection(val anchor: TextAnchor, val text: String)
 data class ReaderFootnote(val index: Int, val label: String, val text: String, val shortened: Boolean)
-data class ReaderLocation(val anchor: TextAnchor, val progress: Int, val atFootnote: Boolean)
+data class ReaderLocation(val anchor: TextAnchor, val progress: Int, val atFootnote: Boolean, val section: String)
 data class SpokenText(val text: String, val anchor: String)
 data class ReaderAsset(val mime: String, val input: InputStream)
 
@@ -52,7 +52,8 @@ class ReaderWeb(
     private val onReady: (ReaderWeb) -> Unit,
     private val onFind: (Int, Int) -> Unit
 ) : WebView(context) {
-    private val saveScroll = Runnable { readLocation { it?.let(onPosition) } }
+    private var positionQueued = false
+    private val readScroll = Runnable { reportPosition() }
     private val highlightId = View.generateViewId()
     private val noteId = View.generateViewId()
     private var ready = false
@@ -111,12 +112,16 @@ class ReaderWeb(
             }
         }
         setOnScrollChangeListener { _, _, _, _, _ ->
-            removeCallbacks(saveScroll)
-            if (ready) postDelayed(saveScroll, 520)
+            if (ready && !positionQueued) {
+                positionQueued = true
+                postDelayed(readScroll, 140)
+            }
         }
         setFindListener { index, count, complete -> if (complete) onFind(if (count == 0) 0 else index + 1, count) }
         loadUrl(Index)
     }
+
+    fun contents(ids: List<String>) = script("contents(${JSONArray(ids)})")
 
     fun go(anchor: TextAnchor, result: (Boolean) -> Unit = {}) {
         script("go(${anchor.json()})") {
@@ -128,7 +133,8 @@ class ReaderWeb(
     private fun readLocation(deliver: (ReaderLocation?) -> Unit) {
         script("position()") { raw ->
             deliver(parseObject(raw)?.let {
-                ReaderLocation(TextAnchor.from(it), it.optInt("progress").coerceIn(0, 100), it.optBoolean("atFootnote"))
+                ReaderLocation(TextAnchor.from(it), it.optInt("progress").coerceIn(0, 100),
+                    it.optBoolean("atFootnote"), it.optString("section"))
             })
         }
     }
@@ -138,7 +144,8 @@ class ReaderWeb(
     }
 
     private fun reportPosition() {
-        removeCallbacks(saveScroll)
+        removeCallbacks(readScroll)
+        positionQueued = false
         readLocation { it?.let(onPosition) }
     }
 
@@ -184,7 +191,7 @@ class ReaderWeb(
             .put("measure", "${preferences.readingWidth.columns}em")
             .put("scheme", if (colors.dark) "dark" else "light")
             .put("face", if (preferences.serif) "'Noto Serif CJK SC','Noto Serif SC',serif" else "sans-serif")
-        script("typography($variables,$keepPosition)")
+        script("typography($variables,$keepPosition)") { if (keepPosition) reportPosition() }
     }
 
     private fun previewFootnote(index: Int) {
@@ -204,7 +211,7 @@ class ReaderWeb(
 
     fun close() {
         ready = false
-        removeCallbacks(saveScroll)
+        removeCallbacks(readScroll)
         stopLoading()
         destroy()
     }

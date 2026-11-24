@@ -37,6 +37,7 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
+import app.marxistlibrary.reader.catalog.LibraryDirectory
 import app.marxistlibrary.reader.sources.ArchiveRef
 import app.marxistlibrary.reader.ui.CatalogScreen
 import app.marxistlibrary.reader.ui.DocumentScreen
@@ -67,7 +68,8 @@ data class DocumentRoute(
     val quote: String = "",
     val offset: Int = 0,
     val digest: String = "",
-    val textOnly: Boolean = false
+    val textOnly: Boolean = false,
+    val ancestors: List<String> = emptyList()
 ) : NavKey {
     val ref get() = ArchiveRef(path, anchor)
 
@@ -116,6 +118,13 @@ class MainActivity : ComponentActivity() {
                 if (stack.lastOrNull() is DocumentRoute && stack.size > 1) back()
                 open(key)
             }
+        }
+        fun openDirectory(key: DocumentRoute) {
+            val index = if (key.path == LibraryDirectory.ref.path) 0 else stack.indexOfLast {
+                it is DocumentRoute && it.path == key.path && it.anchor.isEmpty() && !it.textOnly
+            }
+            if (index < 0) open(key)
+            else while (stack.lastIndex > index) back()
         }
         LaunchedEffect(model) { model.messages.collect { notices.showSnackbar(it) } }
         LaunchedEffect(incoming) {
@@ -179,7 +188,7 @@ class MainActivity : ComponentActivity() {
                         entry<SettingsRoute> { SettingsScreen(model, ::back, ::open) }
                         entry<DownloadRoute> { route -> DownloadScreen(model, route.id, ::back, ::open) }
                         entry<DocumentRoute> { route ->
-                            DocumentScreen(model, route, ::back, ::open, ::replace, { open(SettingsRoute) },
+                            DocumentScreen(model, route, ::back, ::open, ::replace, ::openDirectory, { open(SettingsRoute) },
                                 { open(DownloadRoute(it)) })
                         }
                     }

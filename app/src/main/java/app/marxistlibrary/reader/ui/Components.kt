@@ -1,6 +1,8 @@
 package app.marxistlibrary.reader.ui
 
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,25 +27,35 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import android.text.format.Formatter
+import app.marxistlibrary.reader.catalog.Archive
 import app.marxistlibrary.reader.catalog.ArchiveProgress
+import app.marxistlibrary.reader.catalog.OpenPage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.IOException
 
 enum class Glyph {
     BOOK, SHELF, FIND, SETTINGS, BACK, NEXT, DOWNLOAD, MARK, MORE, TOC, TYPE, NOTES, REFRESH, LINK, SPEAK, CLOSE,
@@ -159,13 +171,25 @@ fun SectionTitle(title: String, actionLabel: String? = null, action: () -> Unit 
 }
 
 @Composable
-fun EntryRow(title: String, description: String = "", icon: Glyph = Glyph.BOOK, onClick: () -> Unit) {
-    Surface(onClick = onClick, modifier = Modifier.fillMaxWidth().heightIn(min = 62.dp)) {
+fun EntryRow(
+    title: String, description: String = "", icon: Glyph = Glyph.BOOK, current: Boolean = false,
+    type: String = "", onClick: () -> Unit
+) {
+    Surface(onClick = onClick,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 62.dp).then(if (current) Modifier.semantics { selected = true } else Modifier),
+        color = if (current) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface
+    ) {
         Row(Modifier.padding(horizontal = 8.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             GlyphIcon(icon, color = MaterialTheme.colorScheme.primary)
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                if (type.isNotBlank()) {
+                    Surface(Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = RoundedCornerShape(6.dp)) {
+                        Text(type, Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelMedium)
+                    }
+                }
                 if (description.isNotBlank()) {
                     Spacer(Modifier.height(3.dp))
                     Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -179,14 +203,35 @@ fun EntryRow(title: String, description: String = "", icon: Glyph = Glyph.BOOK, 
 }
 
 @Composable
-fun BookCover(title: String, modifier: Modifier = Modifier, warm: Boolean = false) {
+fun sourceCover(archive: Archive, path: String, page: OpenPage? = null): ImageBitmap? =
+    produceState<ImageBitmap?>(null, archive, path, page?.details?.cover, page?.digest) {
+        value = null
+        val file = try {
+            if (page == null) archive.coverFile(path) else archive.coverFile(page)
+        } catch (_: IOException) {
+            null
+        } ?: return@produceState
+        value = withContext(Dispatchers.IO) {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.path, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@withContext null
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 512) sample *= 2
+            BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })?.asImageBitmap()
+        }
+    }.value
+
+@Composable
+fun BookCover(title: String, modifier: Modifier = Modifier, warm: Boolean = false, cover: ImageBitmap? = null) {
     val color = MaterialTheme.colorScheme
     Surface(
         modifier = modifier, shape = RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp, topStart = 7.dp, bottomStart = 7.dp),
-        color = if (warm) color.secondaryContainer else color.primary,
+        color = if (cover != null) color.surfaceContainerHigh else if (warm) color.secondaryContainer else color.primary,
         contentColor = if (warm) color.onSecondaryContainer else color.onPrimary
     ) {
-        Box {
+        if (cover != null) {
+            Image(cover, "原网页封面", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        } else Box {
             Canvas(Modifier.fillMaxSize()) {
                 val line = if (warm) color.onSecondaryContainer else color.onPrimary
                 drawLine(line.copy(alpha = 0.7f), Offset(size.width * 0.16f, size.height * 0.13f),

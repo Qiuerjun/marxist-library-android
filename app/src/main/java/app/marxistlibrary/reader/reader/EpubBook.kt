@@ -50,9 +50,7 @@ class EpubBook private constructor(private val file: File, val chapters: List<Ep
                 else -> Unit
             }
         }
-        val headings = safe.select("h1[id],h2[id],h3[id],h4[id],h5[id],h6[id]").map {
-            Heading(it.id(), it.text().take(180), it.tagName().last().digitToInt())
-        }.take(300)
+        val headings = ArchiveMarkup.contents(safe.body())
         return EpubPage(safe.body().html(), headings, images)
     }
 

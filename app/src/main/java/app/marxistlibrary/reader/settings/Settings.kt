@@ -20,6 +20,10 @@ enum class Appearance(val label: String) {
     SYSTEM("跟随系统"), LIGHT("浅色"), PAPER("暖纸"), DARK("深色")
 }
 
+enum class CoverStyle(val label: String) {
+    SOURCE_IMAGE("原网页图片"), TEXT("文字封面")
+}
+
 enum class ReadingWidth(val label: String, val columns: Int) {
     NARROW("窄", 34), STANDARD("适中", 42), WIDE("宽", 52)
 }
@@ -35,6 +39,7 @@ data class PdfSettings(
 
 data class ReadingSettings(
     val appearance: Appearance = Appearance.SYSTEM,
+    val coverStyle: CoverStyle = CoverStyle.SOURCE_IMAGE,
     val fontSize: Int = 18,
     val lineHeight: Int = 170,
     val margin: Int = 22,
@@ -53,6 +58,7 @@ data class ReadingSettings(
 class Settings(context: Context) {
     private val store = context.settingsStore
     private val appearance = stringPreferencesKey("appearance")
+    private val coverStyle = stringPreferencesKey("cover_style")
     private val fontSize = intPreferencesKey("font_size")
     private val lineHeight = intPreferencesKey("line_height")
     private val margin = intPreferencesKey("margin")
@@ -74,6 +80,7 @@ class Settings(context: Context) {
     }.map { saved ->
         ReadingSettings(
             appearance = Appearance.entries.firstOrNull { it.name == saved[appearance] } ?: Appearance.SYSTEM,
+            coverStyle = CoverStyle.entries.firstOrNull { it.name == saved[coverStyle] } ?: CoverStyle.SOURCE_IMAGE,
             fontSize = (saved[fontSize] ?: 18).coerceIn(12, 34),
             lineHeight = (saved[lineHeight] ?: 170).coerceIn(130, 230),
             margin = (saved[margin] ?: 22).coerceIn(10, 42),
@@ -97,6 +104,7 @@ class Settings(context: Context) {
     suspend fun current() = values.first()
 
     suspend fun appearance(value: Appearance) = save(appearance, value.name)
+    suspend fun coverStyle(value: CoverStyle) = save(coverStyle, value.name)
     suspend fun fontSize(value: Int) = save(fontSize, value.coerceIn(12, 34))
     suspend fun lineHeight(value: Int) = save(lineHeight, value.coerceIn(130, 230))
     suspend fun margin(value: Int) = save(margin, value.coerceIn(10, 42))

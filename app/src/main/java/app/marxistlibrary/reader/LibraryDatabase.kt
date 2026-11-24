@@ -1,5 +1,6 @@
 package app.marxistlibrary.reader
 
+import androidx.room.AutoMigration
 import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
@@ -7,6 +8,7 @@ import androidx.room.Entity
 import androidx.room.Fts4
 import androidx.room.Index
 import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
@@ -28,6 +30,11 @@ data class CatalogEntry(
     val rank: Int = 0,
     val searchable: String = ""
 )
+
+@Entity(tableName = "directory_links", primaryKeys = ["path", "parent"])
+data class DirectoryLink(val path: String, val parent: String, val parentTitle: String)
+
+data class StoredFormat(val path: String, val format: String)
 
 @Entity(tableName = "pages")
 data class SavedPage(
@@ -149,20 +156,28 @@ data class ParagraphMatch(
 
 @Dao
 interface LibraryDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE) fun putSeedCatalog(entries: List<CatalogEntry>)
     @Upsert fun putCatalog(entries: List<CatalogEntry>)
-    @Query("SELECT count(*) FROM catalog") fun catalogCount(): Int
     @Query("SELECT * FROM catalog WHERE category IN ('作者', '全集', '专题', '词典', '推荐') ORDER BY rank, key")
     fun homeCatalog(): Flow<List<CatalogEntry>>
     @Query("SELECT * FROM catalog WHERE path = :path ORDER BY CASE WHEN anchor = '' THEN 0 ELSE 1 END LIMIT 1")
     fun entry(path: String): CatalogEntry?
     @Query("SELECT * FROM catalog WHERE instr(searchable, :query) > 0 ORDER BY CASE WHEN title = :query THEN 0 ELSE 1 END, rank, key LIMIT 200")
     fun findCatalog(query: String): List<CatalogEntry>
+    @Query("SELECT DISTINCT path FROM catalog WHERE kind = 'directory' AND path IN (:paths)")
+    fun knownDirectories(paths: List<String>): List<String>
+
+    @Upsert fun putDirectoryLinks(links: List<DirectoryLink>)
+    @Query("SELECT count(*) FROM directory_links") fun directoryLinkCount(): Int
+    @Query("SELECT * FROM directory_links WHERE path = :path ORDER BY parent") fun directoryParents(path: String): List<DirectoryLink>
+    @Query("SELECT * FROM pages WHERE format = 'DIRECTORY'") fun directoryPages(): List<SavedPage>
 
     @Upsert fun putPage(page: SavedPage)
     @Query("SELECT * FROM pages WHERE path = :path") fun page(path: String): SavedPage?
     @Query("UPDATE pages SET accessedAt = :time WHERE path = :path") fun touchPage(path: String, time: Long)
     @Query("DELETE FROM pages WHERE path = :path AND digest = :digest") fun removePage(path: String, digest: String)
     @Query("SELECT * FROM pages ORDER BY accessedAt ASC") fun pages(): List<SavedPage>
+    @Query("SELECT path, format FROM pages WHERE path IN (:paths)") fun savedFormats(paths: List<String>): List<StoredFormat>
     @Query("SELECT DISTINCT path FROM download_items WHERE digest != ''") fun pinnedPaths(): List<String>
 
     @Upsert fun putFavorite(favorite: Favorite)
@@ -220,11 +235,12 @@ interface LibraryDao {
 
 @Database(
     entities = [
-        CatalogEntry::class, SavedPage::class, Favorite::class, ReadingPosition::class,
+        CatalogEntry::class, DirectoryLink::class, SavedPage::class, Favorite::class, ReadingPosition::class,
         Bookmark::class, CustomMirror::class, UpdateEntry::class, DownloadTask::class,
         DownloadItem::class, Paragraph::class, ParagraphIndex::class
     ],
-    version = 1
+    version = 2,
+    autoMigrations = [AutoMigration(from = 1, to = 2)]
 )
 abstract class LibraryDatabase : RoomDatabase() {
     abstract fun library(): LibraryDao

@@ -25,6 +25,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -36,6 +37,7 @@ import app.marxistlibrary.reader.Bookmark
 import app.marxistlibrary.reader.DocumentRoute
 import app.marxistlibrary.reader.DownloadTask
 import app.marxistlibrary.reader.LibraryModel
+import app.marxistlibrary.reader.catalog.PageFormat
 import kotlinx.coroutines.flow.map
 import app.marxistlibrary.reader.sources.ArchiveRef
 import java.time.Instant
@@ -50,6 +52,14 @@ fun ShelfScreen(model: LibraryModel, open: (DocumentRoute) -> Unit, task: (Int) 
     val tabs = listOf("收藏", "书签与笔记", "最近阅读", "下载")
     var selected by rememberSaveable { mutableStateOf(tabs.first()) }
     var editing by remember { mutableStateOf<Bookmark?>(null) }
+    val paths = when (selected) {
+        "收藏" -> favorites.orEmpty().map { it.path }
+        "书签与笔记" -> marks.orEmpty().map { it.path }
+        "最近阅读" -> recent.orEmpty().map { it.path }
+        else -> downloads.orEmpty().map { it.root }
+    }.toSet()
+    val formats = shelfFormats(model, paths)
+    fun type(path: String) = (formats[path] ?: PageFormat.fromPath(path)).label
     Column(Modifier.fillMaxSize()) {
         Toolbar("书架", actions = { IconAction(Glyph.SETTINGS, "设置与备份", action = settings) })
         Row(Modifier.padding(horizontal = 20.dp).horizontalScroll(rememberScrollState()),
@@ -63,7 +73,7 @@ fun ShelfScreen(model: LibraryModel, open: (DocumentRoute) -> Unit, task: (Int) 
                     if (known == null) item { LoadingPanel("正在读取收藏") }
                     else if (known.isEmpty()) item { MessagePanel("书架还没有收藏", "在目录或阅读器中点按收藏，将作品保存到这里") }
                     items(known.orEmpty(), key = { it.key }) { item ->
-                        ShelfRow(item.title, item.author, Glyph.BOOK,
+                        ShelfRow(item.title, item.author, Glyph.BOOK, type(item.path),
                             open = { open(DocumentRoute(item.path, item.anchor, title = item.title)) },
                             menu = listOf("取消收藏" to {
                                 model.action { model.library.favorite(ArchiveRef(item.path, item.anchor), item.title, item.author, false) }
@@ -78,7 +88,13 @@ fun ShelfScreen(model: LibraryModel, open: (DocumentRoute) -> Unit, task: (Int) 
                         AssistChip(onClick = settings, label = { Text("导出笔记与备份") }, leadingIcon = { GlyphIcon(Glyph.LINK, size = 16.dp) })
                     }
                     items(known.orEmpty(), key = { it.id }) { item ->
+                        val markType = when {
+                            item.note.isNotBlank() -> "笔记"
+                            item.selection.isNotBlank() -> "高亮"
+                            else -> "书签"
+                        }
                         ShelfRow(item.title, item.note.ifBlank { item.selection }.ifBlank { item.quote }, Glyph.MARK,
+                            "${type(item.path)} · $markType",
                             open = { open(DocumentRoute.from(item)) },
                             menu = listOf(
                                 "编辑笔记" to { editing = item },
@@ -91,7 +107,7 @@ fun ShelfScreen(model: LibraryModel, open: (DocumentRoute) -> Unit, task: (Int) 
                     if (known == null) item { LoadingPanel("正在读取最近阅读") }
                     else if (known.isEmpty()) item { MessagePanel("还没有阅读记录", "从文库打开一篇作品，阅读位置会自动保存") }
                     items(known.orEmpty(), key = { it.edition }) { item ->
-                        ShelfRow(item.title, friendlyDate(Instant.ofEpochMilli(item.updatedAt).toString()), Glyph.BOOK,
+                        ShelfRow(item.title, friendlyDate(Instant.ofEpochMilli(item.updatedAt).toString()), Glyph.BOOK, type(item.path),
                             open = { open(DocumentRoute.from(item)) },
                             menu = listOf("移除最近阅读" to { model.action { model.library.removePosition(item.edition) } }))
                     }
@@ -104,7 +120,7 @@ fun ShelfScreen(model: LibraryModel, open: (DocumentRoute) -> Unit, task: (Int) 
                         val current = transfers[item.id]?.takeIf { item.state == "RUNNING" && it.generation == item.generation }
                         val percent = current?.archive?.fraction?.let { " · ${(it * 100).toInt()}%" }.orEmpty()
                         val detail = current?.let { it.archive.stage.label + percent } ?: downloadLabel(item)
-                        EntryRow(item.title, detail, Glyph.DOWNLOAD) { task(item.id) }
+                        EntryRow(item.title, detail, Glyph.DOWNLOAD, type = type(item.root)) { task(item.id) }
                     }
                 }
             }
@@ -125,10 +141,12 @@ fun ShelfScreen(model: LibraryModel, open: (DocumentRoute) -> Unit, task: (Int) 
 }
 
 @Composable
-private fun ShelfRow(title: String, detail: String, icon: Glyph, open: () -> Unit, menu: List<Pair<String, () -> Unit>>) {
+private fun ShelfRow(
+    title: String, detail: String, icon: Glyph, type: String, open: () -> Unit, menu: List<Pair<String, () -> Unit>>
+) {
     var expanded by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) { EntryRow(title, detail, icon, open) }
+        Column(Modifier.weight(1f)) { EntryRow(title, detail, icon, type = type, onClick = open) }
         Column {
             IconAction(Glyph.MORE, "更多操作") { expanded = true }
             DropdownMenu(expanded, { expanded = false }) {
@@ -137,6 +155,12 @@ private fun ShelfRow(title: String, detail: String, icon: Glyph, open: () -> Uni
         }
     }
 }
+
+@Composable
+private fun shelfFormats(model: LibraryModel, paths: Set<String>): Map<String, PageFormat> =
+    produceState<Map<String, PageFormat>>(emptyMap(), model, paths) {
+        value = model.archive.documentFormats(paths)
+    }.value
 
 @Composable
 fun DownloadScreen(model: LibraryModel, id: Int, back: () -> Unit, open: (DocumentRoute) -> Unit) {
@@ -152,10 +176,13 @@ fun DownloadScreen(model: LibraryModel, id: Int, back: () -> Unit, open: (Docume
             else LoadingPanel("正在读取下载任务")
             return
         }
+        val formats = shelfFormats(model, items.mapTo(mutableSetOf(entry.root)) { it.path })
+        fun type(path: String) = (formats[path] ?: PageFormat.fromPath(path)).label
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             item {
                 Text(entry.title, style = MaterialTheme.typography.headlineMedium)
-                Text(downloadLabel(entry), Modifier.padding(top = 8.dp, bottom = 12.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("${type(entry.root)} · ${downloadLabel(entry)}", Modifier.padding(top = 8.dp, bottom = 12.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (entry.total > 0) LinearProgressIndicator(
                     progress = { (entry.count.toFloat() / entry.total).coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth()
@@ -182,7 +209,9 @@ fun DownloadScreen(model: LibraryModel, id: Int, back: () -> Unit, open: (Docume
             items(items, key = { it.path }) { item ->
                 val ready = item.digest.isNotBlank()
                 if (ready) {
-                    EntryRow(item.title, "已离线保存", Glyph.CHECK) { open(DocumentRoute(item.path, edition = entry.root, title = item.title)) }
+                    EntryRow(item.title, "已离线保存", Glyph.CHECK, type = type(item.path)) {
+                        open(DocumentRoute(item.path, edition = entry.root, title = item.title))
+                    }
                 } else {
                     Text(item.title, Modifier.padding(top = 12.dp), style = MaterialTheme.typography.titleMedium)
                     Text(item.error.ifBlank { "等待下载" }, style = MaterialTheme.typography.bodyMedium,
