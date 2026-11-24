@@ -51,7 +51,6 @@ import app.marxistlibrary.reader.catalog.Chapter
 import app.marxistlibrary.reader.catalog.LibraryDirectory
 import app.marxistlibrary.reader.catalog.OpenPage
 import app.marxistlibrary.reader.catalog.PageFormat
-import app.marxistlibrary.reader.openWebsite
 import app.marxistlibrary.reader.reader.ArticleScreen
 import app.marxistlibrary.reader.reader.AttachmentScreen
 import app.marxistlibrary.reader.settings.CoverStyle
@@ -69,7 +68,8 @@ fun DocumentScreen(
     replace: (DocumentRoute) -> Unit,
     openDirectory: (DocumentRoute) -> Unit,
     settings: () -> Unit,
-    download: (Int) -> Unit
+    download: (Int) -> Unit,
+    openOriginal: (ArchiveRef) -> Unit
 ) {
     val context = LocalContext.current
     var reload by remember { mutableStateOf(0) }
@@ -143,6 +143,7 @@ fun DocumentScreen(
     }
 
     val current = page
+    val openOriginalPage = { openOriginal(current?.ref ?: route.ref) }
     if (current == null) {
         Column(Modifier.fillMaxSize()) {
             Toolbar(title, back)
@@ -150,7 +151,7 @@ fun DocumentScreen(
             if (stage != null) ArchiveLoadingPanel(stage)
             else {
                 MessagePanel("暂时无法打开", problem.orEmpty(), "重试", { reload++ }, "打开原网页",
-                    { openWebsite(context, route.ref.original) })
+                    openOriginalPage)
                 TextButton(onClick = settings, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("检查或切换镜像") }
             }
         }
@@ -159,10 +160,11 @@ fun DocumentScreen(
 
     when {
         current.format == PageFormat.PDF || current.format == PageFormat.EPUB ->
-            AttachmentScreen(model, current, route, back, { addDownloads(current) }, { toggleFavorite(current) }, favorite)
+            AttachmentScreen(model, current, route, back, { addDownloads(current) }, { toggleFavorite(current) }, favorite,
+                openOriginalPage)
         current.format == PageFormat.ARTICLE || (route.textOnly || route.anchor.isNotBlank()) && current.file != null ->
             ArticleScreen(model, current, route, siblings, back, ::sibling, open, { addDownloads(current) },
-                { toggleFavorite(current) }, favorite)
+                { toggleFavorite(current) }, favorite, openOriginalPage)
         else -> {
             val independent = entry?.category == "作者" || route.path == "/chinese/" || entry?.category == "专题"
             val trail by produceState(
@@ -199,7 +201,8 @@ fun DocumentScreen(
                     }
                 },
                 readPage = { open(route.copy(textOnly = true)) },
-                download = { selection -> addDownloads(current, selection, recursive = true) }
+                download = { selection -> addDownloads(current, selection, recursive = true) },
+                openOriginal = openOriginalPage
             )
         }
     }
@@ -210,7 +213,7 @@ private fun DirectoryPage(
     model: LibraryModel, page: OpenPage, title: String, author: String, back: () -> Unit, favorite: Boolean, toggleFavorite: () -> Unit,
     refresh: () -> Unit, progress: ArchiveProgress?, problem: String?, trail: List<Chapter>, openAncestor: (Int) -> Unit,
     openChapter: (Chapter) -> Unit,
-    openLatest: () -> Unit, readPage: () -> Unit, download: (List<Chapter>) -> Unit
+    openLatest: () -> Unit, readPage: () -> Unit, download: (List<Chapter>) -> Unit, openOriginal: () -> Unit
 ) {
     val context = LocalContext.current
     val preferences by model.preferences.collectAsStateWithLifecycle()
@@ -242,7 +245,7 @@ private fun DirectoryPage(
                 TextButton(onClick = { selectionMode = !selectionMode }, enabled = page.chapters.isNotEmpty()) {
                     Text(if (selectionMode) "结束选择" else "选择章节")
                 }
-                TextButton(onClick = { openWebsite(context, page.ref.original) }) { Text("原网页") }
+                TextButton(onClick = openOriginal) { Text("原网页") }
             }
             if (selectionMode) {
                 Button(onClick = { download(page.chapters.filter { it.ref.key in selected }) }, enabled = selected.isNotEmpty()) {

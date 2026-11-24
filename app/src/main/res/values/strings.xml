@@ -34,6 +34,14 @@
     <string name="app_update_install">安装更新</string>
     <string name="app_update_open_github">打开 GitHub</string>
     <string name="app_update_link_failed">设备没有可用的浏览器入口</string>
+    <string name="original_page_title">原网页</string>
+    <string name="original_page_browser">在浏览器中打开</string>
+    <string name="original_page_reload">刷新原网页</string>
+    <string name="original_page_retry">重试</string>
+    <string name="original_page_unavailable">暂时无法打开原网页</string>
+    <string name="original_page_http_error">原站返回 HTTP %1$d</string>
+    <string name="original_page_interrupted">网页显示已中断</string>
+    <string name="original_page_file">此原始链接是下载文件</string>
     <style name="Theme.Library" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowBackground">#FBF8F2</item>

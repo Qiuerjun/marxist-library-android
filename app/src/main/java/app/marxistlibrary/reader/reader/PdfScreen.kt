@@ -66,7 +66,7 @@ private val positionSaver = listSaver<PdfPosition?, Int>(
 @Composable
 internal fun PdfScreen(
     model: LibraryModel, page: OpenPage, route: DocumentRoute, file: File, back: () -> Unit, download: () -> Unit,
-    favorite: () -> Unit, saved: Boolean, external: () -> Unit
+    favorite: () -> Unit, saved: Boolean, external: () -> Unit, openOriginal: () -> Unit
 ) {
     val context = LocalContext.current
     val colors = LocalReaderColors.current
@@ -106,6 +106,17 @@ internal fun PdfScreen(
         if (location == position) return
         location = position
         store(position)
+    }
+
+    fun goToOriginal() {
+        val time = System.currentTimeMillis()
+        scope.launch {
+            (web?.capture() ?: location)?.let {
+                location = it
+                store(it, time)
+            }
+            openOriginal()
+        }
     }
 
     fun resumeAt(): PdfPosition {
@@ -198,7 +209,7 @@ internal fun PdfScreen(
                     (if (saved) "取消收藏" else "收藏") to favorite,
                     "离线下载" to download,
                     "用其他阅读器打开" to external,
-                    "打开原网页" to { openWebsite(context, page.ref.original); Unit }
+                    "打开原网页" to ::goToOriginal
                 ).forEach { (label, action) ->
                     DropdownMenuItem(text = { Text(label) }, onClick = { more = false; action() })
                 }

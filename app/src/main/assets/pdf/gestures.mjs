@@ -46,7 +46,7 @@ export function connectGestures(surface, { step, canTurn, edgeTap, zoom, scale }
         const x = touch.clientX - point.x;
         const y = touch.clientY - point.y;
         const duration = performance.now() - point.at;
-        if (Math.abs(x) > 52 && Math.abs(x) > Math.abs(y) * 1.5 && duration < 850) {
+        if (Math.abs(x) > 52 && Math.abs(x) > Math.abs(y) * 1.5) {
             step(x < 0 ? 1 : -1);
         } else if (edgeTap() && Math.abs(x) < 9 && Math.abs(y) < 9 && duration < 260) {
             const bounds = surface.getBoundingClientRect();

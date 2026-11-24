@@ -34,13 +34,13 @@ import java.io.File
 @Composable
 fun AttachmentScreen(
     model: LibraryModel, page: OpenPage, route: DocumentRoute, back: () -> Unit, download: () -> Unit,
-    favorite: () -> Unit, saved: Boolean
+    favorite: () -> Unit, saved: Boolean, openOriginal: () -> Unit
 ) {
     val file = page.file
     if (file == null) {
         Column {
             Toolbar(page.title, back)
-            MessagePanel("找不到附件")
+            MessagePanel("找不到附件", action = "打开原网页", onAction = openOriginal)
         }
         return
     }
@@ -48,14 +48,14 @@ fun AttachmentScreen(
     fun external() {
         if (!openAttachment(context, file, page.format)) model.notice("找不到可以打开此格式的应用")
     }
-    if (page.format == PageFormat.PDF) PdfScreen(model, page, route, file, back, download, favorite, saved, ::external)
-    else EpubScreen(model, page, route, file, back, download, favorite, saved, ::external)
+    if (page.format == PageFormat.PDF) PdfScreen(model, page, route, file, back, download, favorite, saved, ::external, openOriginal)
+    else EpubScreen(model, page, route, file, back, download, favorite, saved, ::external, openOriginal)
 }
 
 @Composable
 private fun EpubScreen(
     model: LibraryModel, page: OpenPage, route: DocumentRoute, file: File, back: () -> Unit, download: () -> Unit,
-    favorite: () -> Unit, saved: Boolean, external: () -> Unit
+    favorite: () -> Unit, saved: Boolean, external: () -> Unit, openOriginal: () -> Unit
 ) {
     val context = LocalContext.current
     val publication by produceState<Result<EpubBook>?>(null, file) {
@@ -84,7 +84,7 @@ private fun EpubScreen(
         Column(Modifier.fillMaxSize()) {
             Toolbar(route.title.ifBlank { page.title }, back)
             if (publication?.isFailure == true || section?.isFailure == true) {
-                MessagePanel("暂时无法显示 EPUB", "可用系统阅读应用打开原件", "打开附件", external)
+                MessagePanel("暂时无法显示 EPUB", "可用系统阅读应用打开原件", "打开附件", external, "打开原网页", openOriginal)
             } else LoadingPanel("正在准备 EPUB")
         }
         return
@@ -114,7 +114,7 @@ private fun EpubScreen(
                     uri.lastPathSegment?.toIntOrNull()?.let { change(it, uri.fragment.orEmpty()) }
                 } else if (uri.host != "epub.invalid") openWebsite(context, uri.toString())
             },
-            back = back, download = download, favorite = favorite, saved = saved
+            back = back, download = download, favorite = favorite, saved = saved, openOriginal = openOriginal
         )
     }
 }

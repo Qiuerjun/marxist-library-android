@@ -102,7 +102,10 @@ footer { grid-row: 4; min-width: 0; }
     outline: none;
 }
 
-#viewerContainer[data-swipe="true"] { touch-action: pan-y; }
+#viewerContainer[data-swipe="true"] {
+    overflow-x: hidden;
+    touch-action: pan-y;
+}
 
 .pdfViewer.removePageBorders .page {
     margin: 0 auto 10px;

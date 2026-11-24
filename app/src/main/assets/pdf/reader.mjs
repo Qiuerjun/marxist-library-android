@@ -197,7 +197,9 @@ function refresh() {
     const note = notes.join(" · ");
     status.hidden = !note;
     if (status.textContent !== note) status.textContent = note;
-    surface.dataset.swipe = String(viewer.scrollMode === ScrollMode.PAGE && surface.scrollWidth <= surface.clientWidth + 3);
+    // A slide animation can extend the scroll area after the page already fits.
+    const pageWidth = viewer.scrollMode === ScrollMode.PAGE ? viewer.getPageView(page - 1)?.div.offsetWidth ?? 0 : 0;
+    surface.dataset.swipe = String(pageWidth > 0 && pageWidth <= surface.clientWidth + 3);
 }
 
 function restoreOffset(page, offset) {
@@ -415,7 +417,21 @@ document.addEventListener("keydown", event => {
     }
 });
 
-bus.on("pagechanging", () => { refresh(); reportPosition(); });
+bus.on("pagechanging", ({ pageNumber }) => {
+    refresh();
+    reportPosition();
+    if (restoring || !fit || viewer.scrollMode !== ScrollMode.PAGE) return;
+    // PDF.js mounts the new page after this event. Its dimensions can differ from the previous page.
+    queueMicrotask(async () => {
+        const page = viewer.getPageView(pageNumber - 1);
+        if (!page) return;
+        const pdfPage = page.pdfPage ?? await publication.getPage(pageNumber).catch(() => null);
+        if (!pdfPage || !ready || failed || viewer.currentPageNumber !== pageNumber ||
+            viewer.scrollMode !== ScrollMode.PAGE) return;
+        if (!page.pdfPage) page.setPdfPage(pdfPage);
+        fitViewport();
+    });
+});
 bus.on("updateviewarea", () => { refresh(); reportPosition(); });
 bus.on("scalechanging", () => { alignLastPage(); refresh(); });
 bus.on("pagerendered", ({ pageNumber, cssTransform, isDetailView, error }) => {

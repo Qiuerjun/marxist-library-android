@@ -46,6 +46,7 @@ import app.marxistlibrary.reader.ui.Glyph
 import app.marxistlibrary.reader.ui.GlyphIcon
 import app.marxistlibrary.reader.ui.LibraryTheme
 import app.marxistlibrary.reader.ui.LocalReaderColors
+import app.marxistlibrary.reader.ui.OriginalPageScreen
 import app.marxistlibrary.reader.ui.SearchScreen
 import app.marxistlibrary.reader.ui.SettingsScreen
 import app.marxistlibrary.reader.ui.ShelfScreen
@@ -57,6 +58,7 @@ import kotlinx.serialization.Serializable
 @Serializable private data object ShelfRoute : NavKey
 @Serializable private data object SettingsRoute : NavKey
 @Serializable private data class DownloadRoute(val id: Int) : NavKey
+@Serializable private data class OriginalPageRoute(val address: String) : NavKey
 
 @Serializable
 data class DocumentRoute(
@@ -187,9 +189,11 @@ class MainActivity : ComponentActivity() {
                         }
                         entry<SettingsRoute> { SettingsScreen(model, ::back, ::open) }
                         entry<DownloadRoute> { route -> DownloadScreen(model, route.id, ::back, ::open) }
+                        entry<OriginalPageRoute> { route -> OriginalPageScreen(route.address, ::back, model::notice) }
                         entry<DocumentRoute> { route ->
                             DocumentScreen(model, route, ::back, ::open, ::replace, ::openDirectory, { open(SettingsRoute) },
-                                { open(DownloadRoute(it)) })
+                                download = { open(DownloadRoute(it)) },
+                                openOriginal = { open(OriginalPageRoute(it.original)) })
                         }
                     }
                 )

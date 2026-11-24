@@ -83,7 +83,7 @@ import kotlinx.coroutines.withContext
 fun ArticleScreen(
     model: LibraryModel, page: OpenPage, route: DocumentRoute, siblings: List<Chapter>,
     back: () -> Unit, replace: (Chapter) -> Unit, open: (DocumentRoute) -> Unit, download: () -> Unit,
-    favorite: () -> Unit, saved: Boolean
+    favorite: () -> Unit, saved: Boolean, openOriginal: () -> Unit
 ) {
     val context = LocalContext.current
     val html by key(page.ref.path, page.digest) {
@@ -134,7 +134,7 @@ fun ArticleScreen(
                 else open(DocumentRoute(ref.path, ref.anchor, if (ref.path == route.path) route.edition else ref.path))
             }
         },
-        back = back, download = download, favorite = favorite, saved = saved
+        back = back, download = download, favorite = favorite, saved = saved, openOriginal = openOriginal
     )
 }
 
@@ -146,7 +146,7 @@ fun TextReader(
     anchorPrefix: String, asset: (String) -> ReaderAsset?, reloadImages: Boolean = false,
     siblings: List<Chapter> = emptyList(), previous: (() -> Unit)? = null, next: (() -> Unit)? = null,
     openChapter: (Chapter) -> Unit = {}, onLink: (Uri) -> Unit,
-    back: () -> Unit, download: () -> Unit, favorite: () -> Unit, saved: Boolean
+    back: () -> Unit, download: () -> Unit, favorite: () -> Unit, saved: Boolean, openOriginal: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
@@ -293,7 +293,7 @@ fun TextReader(
                     "为选中文字添加笔记" to { browser?.selection { mark(it, true) } },
                     "沉浸阅读" to { immersive = true },
                     "分享原文链接" to { shareText(context, page.ref.original, "分享文献") },
-                    "打开原网页" to { openWebsite(context, page.ref.original) }
+                    "打开原网页" to { capture(openOriginal) }
                 ).forEach { (label, action) ->
                     DropdownMenuItem(text = { Text(label) }, onClick = { expanded = false; action() })
                 }
