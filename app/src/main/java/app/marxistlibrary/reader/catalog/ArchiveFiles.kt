@@ -20,6 +20,27 @@ import java.util.zip.ZipFile
 
 data class Attachment(val digest: String, val file: File, val tag: String?, val modified: String?)
 
+// A shared file frees space only when its last cache entry is removed.
+internal class CacheBudget(pages: Collection<Set<File>>, protected: Set<File>) {
+    private val references = pages.asSequence().flatten().filterNot(protected::contains)
+        .groupingBy { it }.eachCount().toMutableMap()
+    private val sizes = references.keys.associateWith(File::length)
+    var bytes = sizes.values.sum()
+        private set
+
+    fun remove(page: Set<File>) {
+        for (file in page) {
+            val count = references[file] ?: continue
+            if (count == 1) {
+                references.remove(file)
+                bytes -= sizes.getValue(file)
+            } else {
+                references[file] = count - 1
+            }
+        }
+    }
+}
+
 // Bodies and resources are written beside their final destination before they are published.
 class ArchiveFiles(context: Context) {
     private val root = File(context.filesDir, "archive")
@@ -47,23 +68,39 @@ class ArchiveFiles(context: Context) {
         put(image(image.key, image.extension), bytes)
     }
 
-    fun exists(format: PageFormat, digest: String): Boolean = when (format) {
-        PageFormat.DIRECTORY, PageFormat.ARTICLE -> body(digest).let { it.isFile && it.length() > 0 }
-        else -> attachment(digest, format).let { it.isFile && it.length() > 0 }
+    fun document(format: PageFormat, digest: String): File = when (format) {
+        PageFormat.DIRECTORY, PageFormat.ARTICLE -> body(digest)
+        PageFormat.PDF, PageFormat.EPUB -> attachment(digest, format)
+    }
+
+    fun exists(format: PageFormat, digest: String): Boolean =
+        document(format, digest).let { it.isFile && it.length() > 0 }
+
+    internal fun resources(format: PageFormat, digest: String, details: PageDetails): Set<File> = buildSet {
+        add(document(format, digest))
+        details.illustrations.forEach { add(image(it.key, it.extension)) }
+        details.cover?.let { add(image(it.key, it.extension)) }
     }
 
     fun ownedBytes(): Long = root.walkTopDown().filter(File::isFile).sumOf(File::length)
 
-    fun sweep(keepBodies: Set<String>, keepImages: Set<String>, keepAttachments: Set<String>, retired: Set<String>) {
-        // A recently moved file may still be awaiting its Room commit.
-        val publishedBefore = System.currentTimeMillis() - 120_000L
-        fun obsolete(file: File, kept: Set<String>) = file.nameWithoutExtension !in kept &&
-            (file.nameWithoutExtension in retired || file.lastModified() < publishedBefore)
-        bodies.listFiles()?.filter { obsolete(it, keepBodies) }?.forEach(File::delete)
-        images.listFiles()?.filter { obsolete(it, keepImages) }?.forEach(File::delete)
-        attachments.listFiles()?.filter { obsolete(it, keepAttachments) }?.forEach(File::delete)
-        val expired = System.currentTimeMillis() - 7 * 86_400_000L
-        staging.listFiles()?.filter { it.lastModified() < expired }?.forEach(File::delete)
+    internal fun sweep(kept: Set<File>, retired: Set<File>, startedAt: Long): Long {
+        var freed = 0L
+        for (directory in listOf(bodies, images, attachments, staging)) {
+            for (file in directory.listFiles().orEmpty()) {
+                if (file in kept) continue
+                // Newly published files may still be awaiting their Room commit.
+                val deadline = when {
+                    directory == staging -> startedAt - 7 * 86_400_000L
+                    file in retired -> startedAt
+                    else -> startedAt - 120_000L
+                }
+                if (file.lastModified() >= deadline) continue
+                val size = file.length()
+                if (file.delete()) freed += size
+            }
+        }
+        return freed
     }
 
     suspend fun fetchAttachment(

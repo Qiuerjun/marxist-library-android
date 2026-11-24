@@ -24,7 +24,9 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import java.io.ByteArrayInputStream
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.TimeSource
@@ -32,12 +34,15 @@ import kotlin.time.TimeSource
 data class ProbeResult(
     val network: Long,
     val checkedAt: Long,
-    val duration: Long,
+    val homeMillis: Long?,
     val latestYear: Int? = null,
-    val problem: ConnectionIssue? = null
+    val problem: ConnectionIssue? = null,
+    val sampleProblem: ConnectionIssue? = null
 )
 
-enum class ProbeStatus { UNTESTED, CHECKING, AVAILABLE, SLOW, TIMEOUT, OFFLINE, INCOMPLETE, FAILED }
+enum class ProbeStatus {
+    UNTESTED, CHECKING, AVAILABLE, SLOW, TIMEOUT, OFFLINE, SAMPLE_MISSING, SAMPLE_TIMEOUT, WRONG_CONTENT, INCOMPLETE, FAILED
+}
 
 fun probeStatus(result: ProbeResult?, checking: Boolean, online: Boolean): ProbeStatus = when {
     !online -> ProbeStatus.OFFLINE
@@ -45,12 +50,101 @@ fun probeStatus(result: ProbeResult?, checking: Boolean, online: Boolean): Probe
     result == null -> ProbeStatus.UNTESTED
     result.problem == ConnectionIssue.OFFLINE -> ProbeStatus.OFFLINE
     result.problem == ConnectionIssue.TIMEOUT -> ProbeStatus.TIMEOUT
-    result.problem in setOf(ConnectionIssue.MISSING, ConnectionIssue.WRONG_CONTENT, ConnectionIssue.LIMITED) ->
-        ProbeStatus.INCOMPLETE
+    result.problem == ConnectionIssue.WRONG_CONTENT -> ProbeStatus.WRONG_CONTENT
+    result.problem in setOf(ConnectionIssue.MISSING, ConnectionIssue.LIMITED) -> ProbeStatus.INCOMPLETE
     result.problem != null -> ProbeStatus.FAILED
-    result.duration >= 2_500 -> ProbeStatus.SLOW
+    result.sampleProblem == ConnectionIssue.MISSING -> ProbeStatus.SAMPLE_MISSING
+    result.sampleProblem == ConnectionIssue.TIMEOUT -> ProbeStatus.SAMPLE_TIMEOUT
+    result.sampleProblem == ConnectionIssue.WRONG_CONTENT -> ProbeStatus.WRONG_CONTENT
+    result.sampleProblem != null -> ProbeStatus.INCOMPLETE
+    (result.homeMillis ?: 0L) >= 2_500 -> ProbeStatus.SLOW
     else -> ProbeStatus.AVAILABLE
 }
+
+internal data class MirrorCandidate(
+    val source: Source, val missing: Boolean, val failed: Boolean, val probe: ProbeResult?
+)
+
+internal fun rankMirrors(sources: List<Source>, snapshot: (Source) -> MirrorCandidate): List<Source> =
+    sources.map(snapshot).sortedWith(
+        compareBy<MirrorCandidate> { it.missing }
+            .thenBy { it.failed }
+            .thenBy { it.source.id != MainSource.id }
+            .thenBy { it.probe?.problem != null }
+            .thenBy { it.probe == null }
+            .thenBy { it.probe?.sampleProblem != null }
+            .thenByDescending { it.probe?.latestYear ?: 0 }
+            .thenBy { it.probe?.homeMillis ?: Long.MAX_VALUE }
+    ).take(3).map(MirrorCandidate::source)
+
+private const val HomePath = "/chinese/"
+private const val ProbeTimeoutMillis = 6_500L
+private val ArchiveName = Regex("[马馬]克思主[义義]文[库庫]|Marxists Internet Archive", RegexOption.IGNORE_CASE)
+private val ArchiveYear = Regex("\\d{4}\\s*[-—–]\\s*(\\d{4})\\s*历年更新")
+private val Samples = listOf(
+    "/chinese/marx/marxist.org-chinese-marx-1875-4.htm" to Regex("哥[达達][纲綱][领領]批判"),
+    "/chinese/marx/01.htm" to Regex("共[产產][党黨]宣言")
+)
+
+// The homepage has its own deadline. A missing document can be checked against a second sample.
+internal suspend fun checkMirror(source: Source, network: Long, fetch: suspend (String, Int) -> WebReply): ProbeResult {
+    var homeMillis: Long? = null
+    val overview = try {
+        val timer = TimeSource.Monotonic.markNow()
+        val reply = withTimeoutOrNull(ProbeTimeoutMillis) { fetch(HomePath, 512 * 1024) }
+            ?: throw ArchiveProblem(ConnectionIssue.TIMEOUT)
+        homeMillis = timer.elapsedNow().inWholeMilliseconds
+        val page = parseProbePage(reply)
+        val archiveName = ArchiveName.containsMatchIn(page.title()) ||
+            page.select("h1,h2,img[alt]").any { ArchiveName.containsMatchIn(it.text() + it.attr("alt")) }
+        val catalogLinks = page.select("a[href]").asSequence()
+            .mapNotNull { it.absUrl("href").toHttpUrlOrNull()?.let(source::reference) }
+            .map { it.path.substringBefore('?') }.filterNot { it == HomePath }.distinct().take(3).count()
+        if (!archiveName || catalogLinks < 3) throw ArchiveProblem(ConnectionIssue.WRONG_CONTENT)
+        page
+    } catch (problem: ArchiveProblem) {
+        return ProbeResult(network, System.currentTimeMillis(), homeMillis, problem = problem.issue)
+    }
+    val year = ArchiveYear.find(overview.text())?.groupValues?.get(1)?.toIntOrNull()
+    val sampleProblem = checkSample(source, fetch)
+    return ProbeResult(network, System.currentTimeMillis(), homeMillis, year, sampleProblem = sampleProblem)
+}
+
+private suspend fun checkSample(source: Source, fetch: suspend (String, Int) -> WebReply): ConnectionIssue? {
+    var issue = ConnectionIssue.MISSING
+    return try {
+        val verified = withTimeoutOrNull(ProbeTimeoutMillis) {
+            for ((path, title) in Samples) {
+                val reply = try {
+                    fetch(path, 700 * 1024)
+                } catch (problem: ArchiveProblem) {
+                    if (problem.issue == ConnectionIssue.MISSING) continue
+                    if (problem.issue != ConnectionIssue.WRONG_CONTENT) throw problem
+                    issue = problem.issue
+                    continue
+                }
+                val page = parseProbePage(reply)
+                val resolved = source.reference(reply.url)?.path?.substringBefore('?')
+                if (resolved != null && resolved != HomePath &&
+                    (title.containsMatchIn(page.title()) || page.select("h1,h2").any { title.containsMatchIn(it.text()) })) {
+                    return@withTimeoutOrNull true
+                }
+                issue = ConnectionIssue.WRONG_CONTENT
+            }
+            false
+        }
+        when (verified) {
+            true -> null
+            false -> issue
+            null -> ConnectionIssue.TIMEOUT
+        }
+    } catch (problem: ArchiveProblem) {
+        problem.issue
+    }
+}
+
+private fun parseProbePage(reply: WebReply): Document =
+    Jsoup.parse(ByteArrayInputStream(reply.bytes), reply.charset, reply.url.toString())
 
 // Source-wide failures and a missing individual document are tracked separately.
 class Mirrors(context: Context, private val dao: LibraryDao, private val preferences: Settings, private val http: ArchiveHttp) {
@@ -105,16 +199,18 @@ class Mirrors(context: Context, private val dao: LibraryDao, private val prefere
         }
         val now = System.currentTimeMillis()
         val network = networkId()
-        val available = sources.filter { (blockedUntil[it.id] ?: 0) <= now }.sortedWith(
-            compareBy<Source> { (missing[it.id to path] ?: 0) > now }
-                .thenBy { (failed[it.id] ?: 0) > now }
-                .thenBy { it.id != MainSource.id && currentProbe(it, network, now)?.problem != null }
-                .thenBy { it.id != MainSource.id }
-                .thenByDescending { currentProbe(it, network, now)?.latestYear ?: 0 }
-                .thenBy { currentProbe(it, network, now)?.duration ?: 9000 }
-        )
+        val checks = results.value
+        // Sorting only compares values captured once per source, even while a probe completes.
+        val available = rankMirrors(sources.filter { (blockedUntil[it.id] ?: 0) <= now }) { source ->
+            MirrorCandidate(
+                source,
+                missing = (missing[source.id to path] ?: 0) > now,
+                failed = (failed[source.id] ?: 0) > now,
+                probe = checks[source.id]?.takeIf { it.network == network && it.checkedAt + 600_000 > now }
+            )
+        }
         if (available.isEmpty()) throw ArchiveProblem(ConnectionIssue.LIMITED)
-        return available.take(3)
+        return available
     }
 
     suspend fun add(name: String, url: String): Source {
@@ -144,8 +240,19 @@ class Mirrors(context: Context, private val dao: LibraryDao, private val prefere
         }.getValue(key)
         if (current !== task) return current.await()
         try {
-            val result = probeSlots.withPermit { withContext(Dispatchers.Default) { measure(source, network) } }
-            if (key.second == networkId()) results.update { it + (source.id to result) }
+            val priorFailure = failed[source.id]
+            val result = probeSlots.withPermit {
+                if (network == null) ProbeResult(0, System.currentTimeMillis(), null, problem = ConnectionIssue.OFFLINE)
+                else withContext(Dispatchers.Default) {
+                    checkMirror(source, key.second) { path, limit -> http.get(source, path, limit, network = network) }
+                }
+            }
+            if (key.second == networkId()) {
+                results.update { it + (source.id to result) }
+                if (priorFailure != null && result.problem == null && result.sampleProblem == null) {
+                    failed.remove(source.id, priorFailure)
+                }
+            }
             task.complete(result)
             return result
         } catch (error: Exception) {
@@ -154,34 +261,6 @@ class Mirrors(context: Context, private val dao: LibraryDao, private val prefere
         } finally {
             probes.update { it - key }
         }
-    }
-
-    private suspend fun measure(source: Source, network: Network?): ProbeResult {
-        val timer = TimeSource.Monotonic.markNow()
-        var year: Int? = null
-        val issue = try {
-            if (network == null) throw ArchiveProblem(ConnectionIssue.OFFLINE)
-            val available = withTimeoutOrNull(6500) {
-                val home = http.get(source, "/chinese/", 512 * 1024, network = network)
-                val overview = parse(home)
-                val samplePath = "/chinese/marx/marxist.org-chinese-marx-1875-4.htm"
-                val sample = parse(http.get(source, samplePath, 700 * 1024, network = network))
-                if (overview.select("a[href]").size < 30 ||
-                    !overview.title().contains("马克思主义文库") ||
-                    !sample.title().contains("哥达纲领批判")) {
-                    throw ArchiveProblem(ConnectionIssue.WRONG_CONTENT)
-                }
-                year = ArchiveYear.find(overview.text())?.groupValues?.get(1)?.toIntOrNull()
-                true
-            }
-            if (available == null) ConnectionIssue.TIMEOUT else {
-                failed.remove(source.id)
-                null
-            }
-        } catch (problem: ArchiveProblem) {
-            problem.issue
-        }
-        return ProbeResult(network?.networkHandle ?: 0L, System.currentTimeMillis(), timer.elapsedNow().inWholeMilliseconds, year, issue)
     }
 
     fun record(source: Source, path: String, failure: ArchiveProblem) {
@@ -205,16 +284,9 @@ class Mirrors(context: Context, private val dao: LibraryDao, private val prefere
         return ArchiveRef.fromUrl(url, all())
     }
 
-    private fun parse(reply: WebReply) =
-        Jsoup.parse(ByteArrayInputStream(reply.bytes), reply.charset, reply.url.toString())
-
-    private fun currentProbe(source: Source, network: Long, now: Long) =
-        results.value[source.id]?.takeIf { it.network == network && it.checkedAt + 600_000 > now }
-
     private fun source(entry: CustomMirror) = Source.custom(entry.title, entry.base)
 
     companion object {
-        private val ArchiveYear = Regex("\\d{4}\\s*[-—–]\\s*(\\d{4})\\s*历年更新")
         private val UrlInText = Regex("https?://[^\\s<>]+")
     }
 }

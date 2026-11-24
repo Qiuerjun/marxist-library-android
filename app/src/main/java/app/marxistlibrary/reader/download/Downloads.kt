@@ -16,6 +16,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
 import android.os.PersistableBundle
+import android.util.Log
 import androidx.room.withTransaction
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -47,14 +48,18 @@ import app.marxistlibrary.reader.sources.Mirrors
 import app.marxistlibrary.reader.sources.digest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -176,6 +181,19 @@ class Downloads(
         if (task.generation == generation && task.state in Active) schedule(task, immediate = false)
     }
 
+    internal suspend fun recordFailure(id: Int, generation: Int, failure: Exception) = withContext(Dispatchers.IO) {
+        Log.e("ArchiveDownloads", "Download $id could not finish", failure)
+        try {
+            val task = dao.task(id) ?: return@withContext
+            if (task.generation == generation) status(task, "FAILED", "下载意外中断，可点按重试", activeOnly = true)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (storageFailure: Exception) {
+            // A database failure still needs to release the Android task.
+            Log.e("ArchiveDownloads", "Could not record failure for download $id", storageFailure)
+        }
+    }
+
     suspend fun run(id: Int, generation: Int, selectedNetwork: Network?, progress: (Int, Int) -> Unit): Boolean =
         withContext(Dispatchers.IO) {
             mutexes[id % mutexes.size].withLock {
@@ -274,10 +292,13 @@ class Downloads(
         }
     }
 
-    private suspend fun status(task: DownloadTask, state: String, error: String = "", attempts: Int? = null, retryAt: Long = 0) {
+    private suspend fun status(
+        task: DownloadTask, state: String, error: String = "", attempts: Int? = null, retryAt: Long = 0,
+        activeOnly: Boolean = false
+    ) {
         database.withTransaction {
             val latest = dao.task(task.id) ?: return@withTransaction
-            if (latest.generation != task.generation) return@withTransaction
+            if (latest.generation != task.generation || activeOnly && latest.state !in Active) return@withTransaction
             dao.putTask(latest.copy(state = state, error = error, attempts = attempts ?: latest.attempts,
                 retryAt = retryAt, updatedAt = System.currentTimeMillis()))
         }
@@ -299,15 +320,59 @@ class DownloadWork(context: Context, parameters: WorkerParameters) : CoroutineWo
         val app = applicationContext as LibraryApp
         val id = inputData.getInt("id", 0)
         if (id <= 0) return Result.failure()
+        val generation = inputData.getInt("generation", 0)
         val selectedNetwork = if (Build.VERSION.SDK_INT >= 28) network else null
-        val retry = app.downloads.run(id, inputData.getInt("generation", 0), selectedNetwork) { _, _ -> }
-        return if (retry) Result.retry() else Result.success()
+        return try {
+            val retry = app.downloads.run(id, generation, selectedNetwork) { _, _ -> }
+            if (retry) Result.retry() else Result.success()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            app.downloads.recordFailure(id, generation, failure)
+            Result.failure()
+        }
+    }
+}
+
+// JobService callbacks and completion use the same main-thread scope.
+internal class TransferJobs(private val scope: CoroutineScope) {
+    private val running = mutableMapOf<Int, Job>()
+
+    fun start(id: Int, failed: suspend (Exception) -> Unit, finished: () -> Unit, work: suspend () -> Unit) {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            val current = coroutineContext.job
+            try {
+                work()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                current.ensureActive()
+                failed(failure)
+            } finally {
+                // A stopped job belongs to Android again. Its ID may already have been reused.
+                if (running[id] === current) {
+                    running.remove(id)
+                    finished()
+                }
+            }
+        }
+        running.put(id, job)?.cancel()
+        job.start()
+    }
+
+    fun stop(id: Int) {
+        running.remove(id)?.cancel()
+    }
+
+    fun close() {
+        running.clear()
+        scope.cancel()
     }
 }
 
 class TransferJob : JobService() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val jobs = mutableMapOf<Int, Job>()
+    private val jobs = TransferJobs(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate))
 
     override fun onStartJob(params: JobParameters): Boolean {
         if (Build.VERSION.SDK_INT < 34) return false
@@ -315,26 +380,27 @@ class TransferJob : JobService() {
         if (id <= 0) return false
         val app = application as LibraryApp
         val generation = params.extras.getInt("generation")
-        val notification = notice(id, 0, 0)
-        setNotification(params, params.jobId, notification, JOB_END_NOTIFICATION_POLICY_REMOVE)
-        jobs[params.jobId] = scope.launch {
+        jobs.start(
+            params.jobId,
+            failed = { app.downloads.recordFailure(id, generation, it) },
+            finished = { jobFinished(params, false) }
+        ) {
+            setNotification(params, params.jobId, notice(id, 0, 0), JOB_END_NOTIFICATION_POLICY_REMOVE)
             val retry = app.downloads.run(id, generation, params.network) { complete, total ->
                 getSystemService(NotificationManager::class.java).notify(params.jobId, notice(id, complete, total))
             }
             if (retry) app.downloads.deferToWorker(id, generation)
-            jobs.remove(params.jobId)
-            jobFinished(params, false)
         }
         return true
     }
 
     override fun onStopJob(params: JobParameters): Boolean {
-        jobs.remove(params.jobId)?.cancel()
+        jobs.stop(params.jobId)
         return true
     }
 
     override fun onDestroy() {
-        scope.cancel()
+        jobs.close()
         super.onDestroy()
     }
 

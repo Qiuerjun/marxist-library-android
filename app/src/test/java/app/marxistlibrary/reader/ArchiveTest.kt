@@ -182,7 +182,7 @@ class ArchiveTest {
     @Test
     fun mirrorStatusUsesLatencyOnlyForSuccessfulChecks() {
         val fast = ProbeResult(1, 100, 2499)
-        val slow = fast.copy(duration = 2500)
+        val slow = fast.copy(homeMillis = 2500)
         assertEquals(ProbeStatus.AVAILABLE, probeStatus(fast, checking = false, online = true))
         assertEquals(ProbeStatus.SLOW, probeStatus(slow, checking = false, online = true))
         assertEquals(ProbeStatus.CHECKING, probeStatus(fast, checking = true, online = true))

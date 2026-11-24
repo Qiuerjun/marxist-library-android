@@ -145,7 +145,7 @@ fun SettingsScreen(model: LibraryModel, back: () -> Unit, open: (DocumentRoute) 
                 PreferenceRow("自动选源", "优先主站，超时或缺页时尝试其他来源") {
                     RadioButton(prefs.fixedSource.isEmpty(), { model.action { model.settings.fixedSource("") } })
                 }
-                Text("响应时间包含首页和一篇样本文献的检测。达到 2.5 秒时显示为较慢。",
+                Text("响应时间取中文首页。达到 2.5 秒时标为较慢，样本文献另行检测。",
                     Modifier.padding(top = 10.dp, bottom = 3.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall)
             }
@@ -274,19 +274,24 @@ private fun MirrorOption(
     source: Source, result: ProbeResult?, status: ProbeStatus, stale: Boolean, selected: Boolean,
     choose: () -> Unit, probe: () -> Unit, remove: () -> Unit
 ) {
-    val duration = result?.duration
+    val latency = result?.homeMillis?.let { " · $it ms" }.orEmpty()
+    val homeLatency = result?.homeMillis?.let { " · 首页 $it ms" }.orEmpty()
     val label = when (status) {
         ProbeStatus.UNTESTED -> "待检测"
         ProbeStatus.CHECKING -> "检测中"
-        ProbeStatus.AVAILABLE -> if (stale) "可能较旧 · $duration ms" else "可用 · $duration ms"
-        ProbeStatus.SLOW -> "响应较慢 · $duration ms"
-        ProbeStatus.TIMEOUT -> "连接超时"
+        ProbeStatus.AVAILABLE -> if (stale) "可能较旧$latency" else "可用$latency"
+        ProbeStatus.SLOW -> "响应较慢$latency"
+        ProbeStatus.TIMEOUT -> "首页连接超时"
         ProbeStatus.OFFLINE -> "设备未联网"
-        ProbeStatus.INCOMPLETE, ProbeStatus.FAILED -> when (result?.problem) {
-            ConnectionIssue.MISSING -> "缺少样本文献"
-            ConnectionIssue.WRONG_CONTENT -> "样本校验未通过"
-            else -> result?.problem?.label ?: "检测失败"
+        ProbeStatus.SAMPLE_MISSING -> "缺少样本文献$homeLatency"
+        ProbeStatus.SAMPLE_TIMEOUT -> "样本检测超时$homeLatency"
+        ProbeStatus.WRONG_CONTENT -> if (result?.problem != null) "首页内容异常" else "样本文献内容异常$homeLatency"
+        ProbeStatus.INCOMPLETE -> when {
+            result?.sampleProblem != null -> "样本未确认 · ${result.sampleProblem.label}$homeLatency"
+            result?.problem == ConnectionIssue.MISSING -> "缺少中文首页"
+            else -> result?.problem?.label ?: "检测未完成"
         }
+        ProbeStatus.FAILED -> result?.problem?.label ?: "检测失败"
     }
     val checked = if (status == ProbeStatus.CHECKING || result == null) "" else
         "检测于 " + friendlyDate(Instant.ofEpochMilli(result.checkedAt).toString())
@@ -302,16 +307,18 @@ private fun MirrorOption(
 private fun MirrorStatus(status: ProbeStatus, label: String, stale: Boolean) {
     val glyph = when (status) {
         ProbeStatus.AVAILABLE -> if (stale) Glyph.WARNING else Glyph.CHECK
-        ProbeStatus.SLOW, ProbeStatus.TIMEOUT -> Glyph.CLOCK
+        ProbeStatus.SLOW, ProbeStatus.SAMPLE_TIMEOUT -> Glyph.CLOCK
+        ProbeStatus.TIMEOUT, ProbeStatus.FAILED -> Glyph.CLOSE
+        ProbeStatus.SAMPLE_MISSING -> Glyph.FIND
         ProbeStatus.OFFLINE -> Glyph.OFFLINE
-        ProbeStatus.INCOMPLETE, ProbeStatus.FAILED -> Glyph.WARNING
+        ProbeStatus.WRONG_CONTENT, ProbeStatus.INCOMPLETE -> Glyph.WARNING
         ProbeStatus.UNTESTED, ProbeStatus.CHECKING -> Glyph.REFRESH
     }
     val dark = LocalReaderColors.current.dark
     val colors = when {
-        status == ProbeStatus.TIMEOUT || status == ProbeStatus.FAILED ->
+        status in setOf(ProbeStatus.TIMEOUT, ProbeStatus.FAILED, ProbeStatus.WRONG_CONTENT) ->
             if (dark) Color(0xFFFFB5AC) to Color(0xFF4A2927) else Color(0xFF923831) to Color(0xFFFAE2DF)
-        status == ProbeStatus.SLOW || status == ProbeStatus.INCOMPLETE || stale ->
+        status in setOf(ProbeStatus.SLOW, ProbeStatus.INCOMPLETE, ProbeStatus.SAMPLE_MISSING, ProbeStatus.SAMPLE_TIMEOUT) || stale ->
             if (dark) Color(0xFFF0C78C) to Color(0xFF443525) else Color(0xFF81521F) to Color(0xFFF9E9CC)
         status == ProbeStatus.AVAILABLE ->
             if (dark) Color(0xFFA7DDB8) to Color(0xFF263B30) else Color(0xFF286142) to Color(0xFFDFEFE2)

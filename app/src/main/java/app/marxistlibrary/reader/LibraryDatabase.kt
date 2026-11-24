@@ -154,6 +154,10 @@ data class ParagraphMatch(
     val title: String?
 )
 
+// A running download can be between saving its cache entry and pinning it for offline use.
+private const val DownloadProtectsCache =
+    "(digest != '' OR taskId IN (SELECT id FROM downloads WHERE state = 'RUNNING'))"
+
 @Dao
 interface LibraryDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE) fun putSeedCatalog(entries: List<CatalogEntry>)
@@ -178,7 +182,10 @@ interface LibraryDao {
     @Query("DELETE FROM pages WHERE path = :path AND digest = :digest") fun removePage(path: String, digest: String)
     @Query("SELECT * FROM pages ORDER BY accessedAt ASC") fun pages(): List<SavedPage>
     @Query("SELECT path, format FROM pages WHERE path IN (:paths)") fun savedFormats(paths: List<String>): List<StoredFormat>
-    @Query("SELECT DISTINCT path FROM download_items WHERE digest != ''") fun pinnedPaths(): List<String>
+    @Query("SELECT DISTINCT path FROM download_items WHERE " + DownloadProtectsCache)
+    fun cacheProtectedPaths(): List<String>
+    @Query("SELECT EXISTS(SELECT 1 FROM download_items WHERE path = :path AND " + DownloadProtectsCache + ")")
+    fun isCacheProtected(path: String): Boolean
 
     @Upsert fun putFavorite(favorite: Favorite)
     @Query("SELECT * FROM favorites ORDER BY updatedAt DESC") fun favorites(): Flow<List<Favorite>>

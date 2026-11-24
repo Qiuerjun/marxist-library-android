@@ -67,6 +67,7 @@ class Archive(
     private val dao = database.library()
     private val pages = Array(48) { Mutex() }
     private val imageSlots = Semaphore(3)
+    private val cacheTrim = Mutex()
     private val json = Json { ignoreUnknownKeys = true }
 
     suspend fun installSeed() = withContext(Dispatchers.IO) {
@@ -257,36 +258,50 @@ class Archive(
     suspend fun cacheSize() = withContext(Dispatchers.IO) { files.ownedBytes() }
 
     suspend fun trimCache(clear: Boolean = false, releasedPaths: Set<String> = emptySet()): Long = withContext(Dispatchers.IO) {
-        val before = files.ownedBytes()
-        val pinned = dao.pinnedPaths().toSet()
-        val removable = dao.pages().filter { it.path !in pinned }
-        val retired = mutableSetOf<String>()
-        var size = removable.sumOf { it.size }
-        val cap = if (clear) 0L else 128L * 1024 * 1024
-        removable.forEach { page ->
-            if (size <= cap && page.path !in releasedPaths) return@forEach
-            val key = (page.path.hashCode() and Int.MAX_VALUE) % pages.size
-            pages[key].withLock {
-                database.withTransaction {
-                    if (dao.page(page.path)?.digest == page.digest && !dao.isPinned(page.path, page.digest)) {
-                        dao.removePage(page.path, page.digest)
-                        dao.removeParagraphs(page.path)
-                        size -= page.size
-                        retired += page.digest
-                        retired += decode(page.metadata).imageKeys
-                    }
+        cacheTrim.withLock {
+            val startedAt = System.currentTimeMillis()
+            val (saved, protectedPaths) = database.withTransaction { dao.pages() to dao.cacheProtectedPaths().toSet() }
+            val filesByPath = saved.associate { it.path to resources(it) }
+            val protectedFiles = protectedPaths.flatMapTo(mutableSetOf()) { filesByPath[it].orEmpty() }
+            val removable = saved.filterNot { it.path in protectedPaths }
+            val budget = CacheBudget(removable.map { filesByPath.getValue(it.path) }, protectedFiles)
+            val retired = mutableSetOf<File>()
+            val cap = 128L * 1024 * 1024
+            for (page in removable) {
+                val requested = clear || page.path in releasedPaths
+                if (!requested && budget.bytes <= cap) continue
+                if (evictPage(page, requested)) {
+                    val removed = filesByPath.getValue(page.path)
+                    budget.remove(removed)
+                    retired += removed
                 }
             }
+            // Recheck references before deleting files shared by multiple pages.
+            database.withTransaction {
+                val kept = dao.pages().flatMapTo(mutableSetOf(), ::resources)
+                files.sweep(kept, retired, startedAt)
+            }
         }
-        val referenced = dao.pages()
-        files.sweep(
-            referenced.filter { it.format in setOf(PageFormat.DIRECTORY.name, PageFormat.ARTICLE.name) }.map { it.digest }.toSet(),
-            referenced.flatMap { decode(it.metadata).imageKeys }.toSet(),
-            referenced.filter { it.format in setOf(PageFormat.PDF.name, PageFormat.EPUB.name) }.map { it.digest }.toSet(),
-            retired
-        )
-        (before - files.ownedBytes()).coerceAtLeast(0L)
     }
+
+    private suspend fun evictPage(page: SavedPage, requested: Boolean): Boolean {
+        val key = (page.path.hashCode() and Int.MAX_VALUE) % pages.size
+        return pages[key].withLock {
+            database.withTransaction {
+                val current = dao.page(page.path) ?: return@withTransaction false
+                if (current.digest != page.digest || current.metadata != page.metadata ||
+                    !requested && current.accessedAt != page.accessedAt || dao.isCacheProtected(page.path)) {
+                    return@withTransaction false
+                }
+                dao.removePage(page.path, page.digest)
+                dao.removeParagraphs(page.path)
+                true
+            }
+        }
+    }
+
+    private fun resources(page: SavedPage): Set<File> =
+        files.resources(PageFormat.valueOf(page.format), page.digest, decode(page.metadata))
 
     private fun fromLocal(ref: ArchiveRef, saved: SavedPage): OpenPage? {
         val storedFormat = PageFormat.valueOf(saved.format)
@@ -301,7 +316,7 @@ class Archive(
             return null
         }
         val attachment = storedFormat == PageFormat.PDF || storedFormat == PageFormat.EPUB
-        val file = if (attachment) files.attachment(saved.digest, storedFormat) else files.body(saved.digest)
+        val file = files.document(storedFormat, saved.digest)
         val stored = decode(saved.metadata)
         val details = if (attachment) stored else ArchiveMarkup.upgradeDetails(stored, file::readText)
         val format = if (storedFormat == PageFormat.ARTICLE &&
