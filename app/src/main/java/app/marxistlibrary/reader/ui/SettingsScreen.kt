@@ -39,10 +39,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.marxistlibrary.reader.DocumentRoute
 import app.marxistlibrary.reader.LibraryModel
+import app.marxistlibrary.reader.R
 import app.marxistlibrary.reader.library.LibraryBackup
 import app.marxistlibrary.reader.settings.Appearance
 import app.marxistlibrary.reader.settings.CoverStyle
@@ -63,6 +65,7 @@ import kotlin.math.roundToInt
 @Composable
 fun SettingsScreen(model: LibraryModel, back: () -> Unit, open: (DocumentRoute) -> Unit) {
     val context = LocalContext.current
+    val originalPageDataCleared = stringResource(R.string.original_page_data_cleared)
     val prefs by model.preferences.collectAsStateWithLifecycle()
     val sources by model.mirrors.sources.collectAsStateWithLifecycle(initialValue = emptyList())
     val checks by model.mirrors.checks.collectAsStateWithLifecycle()
@@ -77,6 +80,8 @@ fun SettingsScreen(model: LibraryModel, back: () -> Unit, open: (DocumentRoute) 
     var backup by remember { mutableStateOf<LibraryBackup?>(null) }
     var backupWork by remember { mutableStateOf<String?>(null) }
     var cleaning by remember { mutableStateOf(false) }
+    var clearWebDialog by rememberSaveable { mutableStateOf(false) }
+    var clearingWeb by remember { mutableStateOf(false) }
 
     LaunchedEffect(model) { size = model.archive.cacheSize() }
 
@@ -158,7 +163,8 @@ fun SettingsScreen(model: LibraryModel, back: () -> Unit, open: (DocumentRoute) 
                 MirrorOption(source, observed, status, stale, prefs.fixedSource == source.id,
                     choose = { model.action { model.settings.fixedSource(source.id) } },
                     probe = { model.action { model.mirrors.probe(source) } },
-                    remove = { model.action { model.mirrors.remove(source.id) } }
+                    remove = { model.action { model.mirrors.remove(source.id) } },
+                    allowLocalNetwork = { allowed -> model.action { model.mirrors.allowLocalNetwork(source.id, allowed) } }
                 )
             }
             item("extra-sources") {
@@ -169,6 +175,9 @@ fun SettingsScreen(model: LibraryModel, back: () -> Unit, open: (DocumentRoute) 
                 SectionTitle("网络与存储")
                 PreferenceRow("仅 Wi-Fi 下载", "限制后台下载使用的网络") {
                     Switch(prefs.wifiOnly, { value -> model.action { model.settings.wifiOnly(value) } })
+                }
+                PreferenceRow("使用系统代理", "允许系统代理连接公开镜像，镜像域名可由代理解析") {
+                    Switch(prefs.useSystemProxy, { value -> model.action { model.settings.useSystemProxy(value) } })
                 }
                 PreferenceRow("定时检查文库更新", "联网时每天尝试刷新站方 RSS") {
                     Switch(prefs.autoRefresh, { value -> model.action { model.app.setPeriodicRefresh(value) } })
@@ -187,6 +196,11 @@ fun SettingsScreen(model: LibraryModel, back: () -> Unit, open: (DocumentRoute) 
                 }
                 if (cleaning) LoadingPanel("正在清理缓存")
                 else if (size == null) LoadingPanel("正在统计存储占用")
+                EntryRow(
+                    stringResource(R.string.original_page_clear_data),
+                    stringResource(R.string.original_page_clear_data_details),
+                    Glyph.REFRESH
+                ) { if (!clearingWeb) clearWebDialog = true }
             }
             item("backup") {
                 SectionTitle("备份与导出")
@@ -214,10 +228,30 @@ fun SettingsScreen(model: LibraryModel, back: () -> Unit, open: (DocumentRoute) 
         AboutDocumentDialog(document, onDismiss = { aboutDocument = null })
     }
     if (showAppUpdate) AppUpdateDialog(model.appUpdates, onDismiss = { showAppUpdate = false })
-    if (adding) SourceDialog(dismiss = { adding = false }) { title, url ->
+    if (clearWebDialog) {
+        AlertDialog(
+            onDismissRequest = { clearWebDialog = false },
+            title = { Text(stringResource(R.string.original_page_clear_data)) },
+            text = { Text(stringResource(R.string.original_page_clear_data_details)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    clearWebDialog = false
+                    clearingWeb = true
+                    model.action {
+                        try {
+                            clearOriginalPageData(context)
+                            model.notice(originalPageDataCleared)
+                        } finally { clearingWeb = false }
+                    }
+                }) { Text("清除") }
+            },
+            dismissButton = { TextButton(onClick = { clearWebDialog = false }) { Text("取消") } }
+        )
+    }
+    if (adding) SourceDialog(dismiss = { adding = false }) { title, url, local ->
         adding = false
         model.action {
-            val new = model.mirrors.add(title, url)
+            val new = model.mirrors.add(title, url, local)
             model.notice("已添加 ${new.title}")
         }
     }
@@ -253,18 +287,22 @@ fun SettingsScreen(model: LibraryModel, back: () -> Unit, open: (DocumentRoute) 
 }
 
 @Composable
-private fun SourceDialog(dismiss: () -> Unit, submit: (String, String) -> Unit) {
+private fun SourceDialog(dismiss: () -> Unit, submit: (String, String, Boolean) -> Unit) {
     var url by rememberSaveable { mutableStateOf("") }
     var title by rememberSaveable { mutableStateOf("") }
+    var local by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = dismiss, title = { Text("添加镜像") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(title, { title = it.take(60) }, label = { Text("显示名称") }, singleLine = true)
                 OutlinedTextField(url, { url = it.take(600) }, label = { Text("HTTPS 基地址") }, singleLine = true)
+                PreferenceRow("信任局域网地址", "仅适用于此镜像，使用 HTTPS 直连") {
+                    Switch(local, { local = it })
+                }
             }
         },
-        confirmButton = { TextButton(onClick = { submit(title, url) }, enabled = url.isNotBlank()) { Text("检测并添加") } },
+        confirmButton = { TextButton(onClick = { submit(title, url, local) }, enabled = url.isNotBlank()) { Text("检测并添加") } },
         dismissButton = { TextButton(onClick = dismiss) { Text("取消") } }
     )
 }
@@ -272,7 +310,7 @@ private fun SourceDialog(dismiss: () -> Unit, submit: (String, String) -> Unit) 
 @Composable
 private fun MirrorOption(
     source: Source, result: ProbeResult?, status: ProbeStatus, stale: Boolean, selected: Boolean,
-    choose: () -> Unit, probe: () -> Unit, remove: () -> Unit
+    choose: () -> Unit, probe: () -> Unit, remove: () -> Unit, allowLocalNetwork: (Boolean) -> Unit
 ) {
     val latency = result?.homeMillis?.let { " · $it ms" }.orEmpty()
     val homeLatency = result?.homeMillis?.let { " · 首页 $it ms" }.orEmpty()
@@ -300,6 +338,11 @@ private fun MirrorOption(
         IconAction(Glyph.REFRESH, "检测 ${source.title}", status != ProbeStatus.CHECKING && status != ProbeStatus.OFFLINE, probe)
         if (source.custom) IconAction(Glyph.CLOSE, "移除 ${source.title}", status != ProbeStatus.CHECKING, remove)
         RadioButton(selected, choose)
+    }
+    if (source.custom) {
+        PreferenceRow("信任局域网地址", "仅适用于此镜像，使用 HTTPS 直连") {
+            Switch(source.allowLocalNetwork, allowLocalNetwork, enabled = status != ProbeStatus.CHECKING)
+        }
     }
 }
 

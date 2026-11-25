@@ -13,8 +13,18 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
 import androidx.room.Upsert
+import androidx.room.migration.AutoMigrationSpec
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
+
+internal const val AuthorLengthLimit = 500
+
+class LimitLegacyAuthors : AutoMigrationSpec {
+    override fun onPostMigrate(db: SupportSQLiteDatabase) {
+        db.execSQL("UPDATE favorites SET author = substr(author, 1, $AuthorLengthLimit) WHERE length(author) > $AuthorLengthLimit")
+    }
+}
 
 // Canonical paths identify documents and editions across mirrors.
 @Serializable
@@ -92,7 +102,12 @@ data class Bookmark(
 )
 
 @Entity(tableName = "mirrors")
-data class CustomMirror(@PrimaryKey val id: String, val title: String, val base: String)
+data class CustomMirror(
+    @PrimaryKey val id: String,
+    val title: String,
+    val base: String,
+    @ColumnInfo(defaultValue = "0") val allowLocalNetwork: Boolean = false
+)
 
 @Entity(tableName = "updates", indices = [Index("publishedAt")])
 data class UpdateEntry(
@@ -207,6 +222,7 @@ interface LibraryDao {
     @Upsert fun putMirror(mirror: CustomMirror)
     @Query("SELECT * FROM mirrors ORDER BY title") fun mirrors(): Flow<List<CustomMirror>>
     @Query("SELECT * FROM mirrors ORDER BY title") fun customMirrors(): List<CustomMirror>
+    @Query("UPDATE mirrors SET allowLocalNetwork = :allowed WHERE id = :id") fun allowMirrorLocalNetwork(id: String, allowed: Boolean)
     @Query("DELETE FROM mirrors WHERE id = :id") fun removeMirror(id: String)
 
     @Upsert fun putUpdates(entries: List<UpdateEntry>)
@@ -246,8 +262,8 @@ interface LibraryDao {
         Bookmark::class, CustomMirror::class, UpdateEntry::class, DownloadTask::class,
         DownloadItem::class, Paragraph::class, ParagraphIndex::class
     ],
-    version = 2,
-    autoMigrations = [AutoMigration(from = 1, to = 2)]
+    version = 3,
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3, spec = LimitLegacyAuthors::class)]
 )
 abstract class LibraryDatabase : RoomDatabase() {
     abstract fun library(): LibraryDao

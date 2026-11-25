@@ -1,5 +1,7 @@
 package app.marxistlibrary.reader.catalog
 
+import app.marxistlibrary.reader.AuthorLengthLimit
+
 import app.marxistlibrary.reader.sources.ArchiveProblem
 import app.marxistlibrary.reader.sources.ArchiveRef
 import app.marxistlibrary.reader.sources.ConnectionIssue
@@ -157,7 +159,7 @@ object ArchiveMarkup {
             (isIndexPath(ref.path) && substantial < 5 || chapters.size >= 5 && substantial == 0 && text.length < 4_000))
         val section = body.selectFirst("main, article, [role=main]") ?: body
         val rights = body.select("footer, [class*=copyright], [id*=copyright]").text().take(800)
-        val attribution = document.selectFirst("meta[name=author]")?.attr("content").orEmpty()
+        val attribution = document.selectFirst("meta[name=author]")?.attr("content").orEmpty().take(AuthorLengthLimit)
         fun illustration(raw: String, caption: String = ""): Illustration? {
             if (raw.isBlank()) return null
             val address = reply.url.resolve(raw) ?: return null

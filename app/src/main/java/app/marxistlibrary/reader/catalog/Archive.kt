@@ -1,5 +1,7 @@
 package app.marxistlibrary.reader.catalog
 
+import app.marxistlibrary.reader.DownloadItem
+
 import android.net.Network
 import android.util.Xml
 import androidx.room.withTransaction
@@ -257,6 +259,12 @@ class Archive(
 
     suspend fun cacheSize() = withContext(Dispatchers.IO) { files.ownedBytes() }
 
+    internal suspend fun downloadedFiles(items: List<DownloadItem>): Set<File> =
+        withContext(Dispatchers.IO) {
+            items.mapNotNull { item -> dao.page(item.path)?.takeIf { it.digest == item.digest } }
+                .flatMapTo(mutableSetOf(), ::resources)
+        }
+
     suspend fun trimCache(clear: Boolean = false, releasedPaths: Set<String> = emptySet()): Long = withContext(Dispatchers.IO) {
         cacheTrim.withLock {
             val startedAt = System.currentTimeMillis()
@@ -355,10 +363,12 @@ class Archive(
             throw ArchiveProblem(ConnectionIssue.WRONG_CONTENT)
         }
         progress(ArchiveProgress(ArchiveStage.SAVE))
+        val metadata = json.encodeToString(parsed.details)
+        if (metadata.toByteArray(Charsets.UTF_8).size > 1024 * 1024) throw ArchiveProblem(ConnectionIssue.TOO_LARGE)
         val digest = files.putBody(parsed.html)
         val file = files.body(digest)
         val now = System.currentTimeMillis()
-        val row = SavedPage(ref.path, parsed.title, parsed.format.name, digest, json.encodeToString(parsed.details),
+        val row = SavedPage(ref.path, parsed.title, parsed.format.name, digest, metadata,
             source.id, reply.tag, reply.modified, now, now, file.length())
         database.withTransaction {
             dao.putPage(row)
@@ -449,7 +459,8 @@ class Archive(
             } catch (problem: ArchiveProblem) {
                 last = problem
                 mirrors.record(source, path, problem)
-                if (problem.issue in setOf(ConnectionIssue.LIMITED, ConnectionIssue.TOO_LARGE, ConnectionIssue.STORAGE)) throw problem
+                if (problem.issue in setOf(ConnectionIssue.LIMITED, ConnectionIssue.TOO_LARGE, ConnectionIssue.STORAGE,
+                        ConnectionIssue.NO_SPACE)) throw problem
             }
         }
         throw last

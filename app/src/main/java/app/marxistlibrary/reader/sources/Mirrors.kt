@@ -213,14 +213,22 @@ class Mirrors(context: Context, private val dao: LibraryDao, private val prefere
         return available
     }
 
-    suspend fun add(name: String, url: String): Source {
-        val new = Source.custom(name, url) ?: throw IllegalArgumentException("请输入公开的 HTTPS 镜像地址")
+    suspend fun add(name: String, url: String, allowLocalNetwork: Boolean = false): Source {
+        val new = Source.custom(name, url, allowLocalNetwork) ?: throw IllegalArgumentException("请输入 HTTPS 镜像地址")
         if (all().any { it.base == new.base }) throw IllegalArgumentException("该镜像已添加")
         val decided = new.copy(title = new.title.ifBlank { new.base.host })
         val tested = probe(decided)
         if (tested.problem != null) throw ArchiveProblem(tested.problem)
-        withContext(Dispatchers.IO) { dao.putMirror(CustomMirror(decided.id, decided.title, decided.base.toString())) }
+        withContext(Dispatchers.IO) {
+            dao.putMirror(CustomMirror(decided.id, decided.title, decided.base.toString(), decided.allowLocalNetwork))
+        }
         return decided
+    }
+
+    suspend fun allowLocalNetwork(id: String, allowed: Boolean) {
+        withContext(Dispatchers.IO) { dao.allowMirrorLocalNetwork(id, allowed) }
+        results.update { it - id }
+        failed.remove(id)
     }
 
     suspend fun remove(id: String) {
@@ -284,7 +292,7 @@ class Mirrors(context: Context, private val dao: LibraryDao, private val prefere
         return ArchiveRef.fromUrl(url, all())
     }
 
-    private fun source(entry: CustomMirror) = Source.custom(entry.title, entry.base)
+    private fun source(entry: CustomMirror) = Source.custom(entry.title, entry.base, entry.allowLocalNetwork)
 
     companion object {
         private val UrlInText = Regex("https?://[^\\s<>]+")

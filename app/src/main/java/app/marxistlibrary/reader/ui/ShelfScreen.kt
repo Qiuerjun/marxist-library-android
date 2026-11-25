@@ -31,6 +31,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.marxistlibrary.reader.Bookmark
@@ -164,6 +165,7 @@ private fun shelfFormats(model: LibraryModel, paths: Set<String>): Map<String, P
 
 @Composable
 fun DownloadScreen(model: LibraryModel, id: Int, back: () -> Unit, open: (DocumentRoute) -> Unit) {
+    val context = LocalContext.current
     val lookup by remember(model, id) { model.downloads.task(id).map { it to true } }
         .collectAsStateWithLifecycle(initialValue = null to false)
     val items by remember(model, id) { model.downloads.items(id) }.collectAsStateWithLifecycle(initialValue = emptyList())
@@ -188,7 +190,13 @@ fun DownloadScreen(model: LibraryModel, id: Int, back: () -> Unit, open: (Docume
                     modifier = Modifier.fillMaxWidth()
                 )
                 val active = transfers[id]?.takeIf { entry.state == "RUNNING" && it.generation == entry.generation }
-                if (active != null) ArchiveLoadingPanel(active.archive, item = active.title)
+                if (active != null) {
+                    ArchiveLoadingPanel(active.archive, item = active.title)
+                    if (active.savedBytes > 0) {
+                        val saved = android.text.format.Formatter.formatShortFileSize(context, active.savedBytes)
+                        Text("本任务已保存 $saved", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
                 else if (entry.state == "RUNNING") LoadingPanel("正在准备文献")
                 Row(Modifier.fillMaxWidth().padding(top = 12.dp).horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {

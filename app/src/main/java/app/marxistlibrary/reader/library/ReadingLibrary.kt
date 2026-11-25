@@ -1,6 +1,7 @@
 package app.marxistlibrary.reader.library
 
 import androidx.room.withTransaction
+import app.marxistlibrary.reader.AuthorLengthLimit
 import app.marxistlibrary.reader.Bookmark
 import app.marxistlibrary.reader.Favorite
 import app.marxistlibrary.reader.LibraryDatabase
@@ -22,6 +23,45 @@ data class LibraryBackup(
     val positions: List<ReadingPosition>
 )
 
+private const val ClockSkewMillis = 5 * 60_000L
+private const val TitleLengthLimit = 500
+
+internal fun LibraryBackup.checkForRestore(now: Long): LibraryBackup {
+    val deadline = now + ClockSkewMillis
+    require(schemaVersion == 1) { "暂未支持这个备份版本" }
+    val exported = runCatching { Instant.parse(exportedAt) }.getOrNull()
+    require(exported != null) { "备份时间格式有误" }
+    require(exported <= Instant.ofEpochMilli(deadline)) { "备份时间晚于当前设备时间" }
+    require(favorites.size.toLong() + bookmarks.size + positions.size <= 60_000) { "备份记录过多" }
+    require(favorites.all {
+        ref(it.path, it.anchor)?.key == it.key && text(it.title) && it.author.length <= AuthorLengthLimit
+    }) { "备份含格式无效或过长的收藏记录" }
+    require(bookmarks.all {
+        ref(it.path, it.anchor) != null && ref(it.edition, "") != null && text(it.title) &&
+            it.id.length in 1..100 && it.offset >= 0 &&
+            it.selection.length <= 10_000 && it.note.length <= 10_000 && it.quote.length <= 500 && sha(it.digest)
+    }) { "备份含格式无效或过长的书签记录" }
+    require(positions.all {
+        ref(it.path, it.anchor) != null && ref(it.edition, "") != null && text(it.title) &&
+            it.offset >= 0 && it.quote.length <= 500 && sha(it.digest)
+    }) { "备份含格式无效或过长的阅读进度" }
+    require(favorites.all { it.updatedAt in 1..deadline } && bookmarks.all { it.updatedAt in 1..deadline } &&
+        positions.all { it.updatedAt in 1..deadline }) { "备份含无效或超前的记录时间" }
+    return copy(
+        favorites = favorites.map { if (it.updatedAt > now) it.copy(updatedAt = now) else it },
+        bookmarks = bookmarks.map { if (it.updatedAt > now) it.copy(updatedAt = now) else it },
+        positions = positions.map { if (it.updatedAt > now) it.copy(updatedAt = now) else it }
+    )
+}
+
+private fun ref(path: String, anchor: String): ArchiveRef? {
+    if (anchor.length > ArchiveRef.MaxAnchorLength) return null
+    return ArchiveRef.parse(path)?.takeIf { it.path == path && it.anchor.isEmpty() }?.copy(anchor = anchor)
+}
+
+private fun text(title: String) = title.isNotBlank() && title.length <= TitleLengthLimit
+private fun sha(value: String) = value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
+
 // The device owns reading records. Export and restore operate on the same Room transaction.
 class ReadingLibrary(private val database: LibraryDatabase) {
     private val dao = database.library()
@@ -32,7 +72,8 @@ class ReadingLibrary(private val database: LibraryDatabase) {
     fun marks(path: String) = dao.bookmarks(path)
 
     suspend fun favorite(ref: ArchiveRef, title: String, author: String, selected: Boolean) = withContext(Dispatchers.IO) {
-        if (selected) dao.putFavorite(Favorite(ref.key, ref.path, ref.anchor, title, author, System.currentTimeMillis()))
+        if (selected) dao.putFavorite(Favorite(ref.key, ref.path, ref.anchor, title.take(TitleLengthLimit),
+            author.take(AuthorLengthLimit), System.currentTimeMillis()))
         else dao.removeFavorite(ref.key)
     }
 
@@ -40,12 +81,16 @@ class ReadingLibrary(private val database: LibraryDatabase) {
 
     suspend fun save(position: ReadingPosition) = withContext(Dispatchers.IO) {
         database.withTransaction {
-            if ((dao.position(position.edition)?.updatedAt ?: 0L) <= position.updatedAt) dao.putPosition(position)
+            val old = dao.position(position.edition)?.updatedAt ?: 0L
+            // Earlier versions accepted backup timestamps far ahead of the device clock.
+            if (old <= position.updatedAt || old > System.currentTimeMillis() + ClockSkewMillis) {
+                dao.putPosition(position.copy(title = position.title.take(TitleLengthLimit)))
+            }
         }
     }
 
     suspend fun addMark(position: ReadingPosition, selection: String = "", note: String = "") = withContext(Dispatchers.IO) {
-        dao.putBookmark(Bookmark(UUID.randomUUID().toString(), position.edition, position.path, position.title,
+        dao.putBookmark(Bookmark(UUID.randomUUID().toString(), position.edition, position.path, position.title.take(TitleLengthLimit),
             position.digest, position.anchor, position.quote, position.offset, selection.take(10_000),
             note.take(10_000), System.currentTimeMillis()))
     }
@@ -66,21 +111,7 @@ class ReadingLibrary(private val database: LibraryDatabase) {
     }
 
     suspend fun extract(input: String): LibraryBackup = withContext(Dispatchers.Default) {
-        val backup = json.decodeFromString<LibraryBackup>(input)
-        require(backup.schemaVersion == 1) { "暂未支持这个备份版本" }
-        require(runCatching { Instant.parse(backup.exportedAt) }.isSuccess) { "备份时间格式有误" }
-        require(backup.favorites.size + backup.bookmarks.size + backup.positions.size <= 60_000) { "备份记录过多" }
-        require(backup.favorites.all { ref(it.path, it.anchor)?.key == it.key && text(it.title) && it.updatedAt > 0 })
-        require(backup.bookmarks.all {
-            ref(it.path, it.anchor) != null && ref(it.edition, "") != null && text(it.title) &&
-                it.id.length in 1..100 && it.offset >= 0 && it.updatedAt > 0 &&
-                it.selection.length <= 10_000 && it.note.length <= 10_000 && it.quote.length <= 500 && sha(it.digest)
-        })
-        require(backup.positions.all {
-            ref(it.path, it.anchor) != null && ref(it.edition, "") != null && text(it.title) &&
-                it.offset >= 0 && it.updatedAt > 0 && it.quote.length <= 500 && sha(it.digest)
-        })
-        backup
+        json.decodeFromString<LibraryBackup>(input).checkForRestore(System.currentTimeMillis())
     }
 
     suspend fun merge(backup: LibraryBackup) = withContext(Dispatchers.IO) {
@@ -115,12 +146,5 @@ class ReadingLibrary(private val database: LibraryDatabase) {
         }
     }
 
-    private fun ref(path: String, anchor: String): ArchiveRef? {
-        if (anchor.length > 500) return null
-        return ArchiveRef.parse(path)?.takeIf { it.path == path && it.anchor.isEmpty() }?.copy(anchor = anchor)
-    }
-
-    private fun text(title: String) = title.isNotBlank() && title.length <= 500
-    private fun sha(value: String) = value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
 }
 

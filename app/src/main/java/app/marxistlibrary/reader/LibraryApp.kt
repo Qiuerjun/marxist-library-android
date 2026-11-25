@@ -2,6 +2,7 @@ package app.marxistlibrary.reader
 
 import android.app.Application
 import android.content.Context
+import android.os.Process
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.Room
@@ -45,12 +46,13 @@ class LibraryApp : Application(), Configuration.Provider {
     val archive by lazy { Archive(database, SeedCatalog(this, chinese), ArchiveFiles(this), chinese, settings, mirrors, http) }
     val downloads by lazy { Downloads(this, database, archive, mirrors, settings) }
     val library by lazy { ReadingLibrary(database) }
-    private val http by lazy { ArchiveHttp() }
+    private val http by lazy { ArchiveHttp(useSystemProxy = { settings.current().useSystemProxy }) }
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder().setJobSchedulerJobIdRange(10_000, 29_999).build()
 
     override fun onCreate() {
         super.onCreate()
+        if (Process.myUid() != applicationInfo.uid) return
         scope.launch {
             archive.installSeed()
             runCatching { archive.trimCache() }

@@ -55,6 +55,15 @@
 
 ### 通过 GitHub 发布应用更新
 
+发布前核验构建依赖和内置 PDF.js。Gradle 根据仓库中的 SHA-256 清单校验依赖，审计脚本检查实际解析的依赖版本和 APK 内的 PDF.js 文件。
+
+```shell
+./gradlew --no-build-cache :app:testDebugUnitTest :app:lintDebug :app:assembleRelease :app:releaseDependencyReport
+python tools/check-release-dependencies.py --apk app/build/outputs/apk/release/app-release-unsigned.apk
+```
+
+在 GitHub 草稿中核对标签指向的提交并上传签名后的 APK。启用不可变发行后，发布会固定该版本的标签和附件。
+
 在 GitHub 新建正式 Release，标签使用与 `versionName` 对应的版本号，例如 `v1.1.6`。上传签名后的通用 APK，推荐命名为 `MarxistLibrary-1.1.6.apk`。只有一个 APK 时也可使用其他文件名。后续 APK 使用同一发布密钥签名，`versionCode` 随更新递增。 [项目发布页](https://github.com/Qiuerjun/marxist-library-android/releases)
 
 应用手动检查最新正式 Release。下载后校验大小、包名、版本和签名，有 GitHub SHA-256 时也会核验摘要。首次通过客户端安装时，Android 可能要求允许此应用安装，返回后由用户确认安装。发布页可在下载或安装不可用时打开。

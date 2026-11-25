@@ -42,6 +42,13 @@
     <string name="original_page_http_error">原站返回 HTTP %1$d</string>
     <string name="original_page_interrupted">网页显示已中断</string>
     <string name="original_page_file">此原始链接是下载文件</string>
+    <string name="original_page_external_title">打开外部网站</string>
+    <string name="original_page_external_host">将在系统浏览器中打开 %1$s</string>
+    <string name="original_page_browser_required">请在系统浏览器中使用这个网页功能</string>
+    <string name="original_page_clear_data">清除原网页浏览数据</string>
+    <string name="original_page_clear_data_details">清除应用内网页的 Cookie、站点存储和网页缓存</string>
+    <string name="original_page_data_cleared">已清除原网页浏览数据</string>
+    <string name="original_page_data_clear_failed">无法清除原网页浏览数据，请重试</string>
     <style name="Theme.Library" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowBackground">#FBF8F2</item>

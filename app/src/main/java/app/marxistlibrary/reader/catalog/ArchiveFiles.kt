@@ -1,5 +1,8 @@
 package app.marxistlibrary.reader.catalog
 
+import app.marxistlibrary.reader.download.StorageCheckInterval
+import app.marxistlibrary.reader.download.fitsStorage
+
 import android.content.Context
 import android.net.Network
 import app.marxistlibrary.reader.sources.ArchiveHttp
@@ -43,7 +46,8 @@ internal class CacheBudget(pages: Collection<Set<File>>, protected: Set<File>) {
 
 // Bodies and resources are written beside their final destination before they are published.
 class ArchiveFiles(context: Context) {
-    private val root = File(context.filesDir, "archive")
+    private val storage = context.filesDir
+    private val root = File(storage, "archive")
     private val bodies = File(root, "bodies")
     private val images = File(root, "images")
     private val attachments = File(root, "attachments")
@@ -84,6 +88,10 @@ class ArchiveFiles(context: Context) {
 
     fun ownedBytes(): Long = root.walkTopDown().filter(File::isFile).sumOf(File::length)
 
+    internal fun checkSpace(incoming: Long = 0L) {
+        if (!fitsStorage(storage.usableSpace, incoming)) throw ArchiveProblem(ConnectionIssue.NO_SPACE)
+    }
+
     internal fun sweep(kept: Set<File>, retired: Set<File>, startedAt: Long): Long {
         var freed = 0L
         for (directory in listOf(bodies, images, attachments, staging)) {
@@ -115,6 +123,7 @@ class ArchiveFiles(context: Context) {
         val partial = File(staging, "$key.part")
         val validator = File(staging, "$key.etag")
         staging.mkdirs()
+        checkSpace()
         val tag = validator.takeIf(File::isFile)?.readText()?.takeIf { it.startsWith('"') && it.endsWith('"') }
         val offset = if (tag == null) 0 else partial.length()
         val headers = Headers.Builder().add("Accept-Encoding", "identity").apply {
@@ -140,10 +149,11 @@ class ArchiveFiles(context: Context) {
                 if (nextTag?.startsWith('"') == true && nextTag.endsWith('"')) writeValidator(validator, nextTag)
                 val body = response.body ?: throw ArchiveProblem(ConnectionIssue.WRONG_CONTENT)
                 val startingSize = if (append) offset else 0L
-                val expected = if (append) range?.substringAfterLast('/')?.toLongOrNull()
+                val expected = if (append) range.substringAfterLast('/').toLongOrNull()
                     else body.contentLength().takeIf { it >= 0L }
                 if (append && expected == null) throw ArchiveProblem(ConnectionIssue.SERVER)
                 if (expected != null && expected > MaxAttachment) throw ArchiveProblem(ConnectionIssue.TOO_LARGE)
+                checkSpace((expected?.minus(startingSize) ?: 0L).coerceAtLeast(0))
                 progress(ArchiveProgress(ArchiveStage.DOWNLOAD, startingSize, expected))
                 val output = try {
                     FileOutputStream(partial, append)
@@ -155,11 +165,16 @@ class ArchiveFiles(context: Context) {
                     val buffer = ByteArray(32 * 1024)
                     var total = startingSize
                     var lastUpdate = System.nanoTime()
+                    var nextSpaceCheck = startingSize
                     while (true) {
                         val count = input.read(buffer)
                         if (count < 0) break
                         total += count
                         if (total > MaxAttachment) throw ArchiveProblem(ConnectionIssue.TOO_LARGE)
+                        if (total > nextSpaceCheck) {
+                            checkSpace(maxOf(count.toLong(), expected?.minus(total - count) ?: StorageCheckInterval))
+                            nextSpaceCheck = total + StorageCheckInterval
+                        }
                         try {
                             output.write(buffer, 0, count)
                         } catch (_: IOException) {
@@ -239,6 +254,7 @@ class ArchiveFiles(context: Context) {
     }
 
     private fun put(target: File, bytes: ByteArray) {
+        checkSpace(bytes.size.toLong())
         target.parentFile?.mkdirs()
         var temporary: File? = null
         try {

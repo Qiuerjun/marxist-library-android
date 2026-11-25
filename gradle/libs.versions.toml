@@ -1,6 +1,6 @@
 [versions]
-agp = "9.5.0"
-kotlin = "2.4.10"
+agp = "9.5.2"
+kotlin = "2.4.21"
 ksp = "2.3.14"
 compose = "2026.09.00"
 core = "1.17.0"
@@ -12,9 +12,14 @@ datastore = "1.2.0"
 work = "2.11.0"
 webkit = "1.15.0"
 okhttp = "4.12.1"
-jsoup = "1.23.1"
+jsoup = "1.24.1"
 serialization = "1.10.0"
 junit = "4.13.2"
+build-guava = "33.7.2-jre"
+build-commons-lang = "3.18.0"
+build-jose4j = "0.9.6"
+build-jdom = "2.0.6.1"
+build-bouncycastle = "1.85"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

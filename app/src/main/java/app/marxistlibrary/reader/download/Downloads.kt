@@ -66,7 +66,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
-data class DownloadProgress(val generation: Int, val title: String, val archive: ArchiveProgress)
+data class DownloadProgress(val generation: Int, val title: String, val archive: ArchiveProgress, val savedBytes: Long = 0)
 
 // A task has one generation. Pause and cancel invalidate any older worker's state updates.
 class Downloads(
@@ -86,6 +86,7 @@ class Downloads(
 
     suspend fun add(root: ArchiveRef, title: String, chapters: List<Chapter> = emptyList(), recursive: Boolean = false): Int {
         val selection = if (chapters.isEmpty()) listOf(Chapter(root, title)) else chapters.distinctBy { it.ref.path }
+        require(selection.size <= MaxPages) { "目录较大，请选择卷册或章节下载" }
         val key = digest(root.path + "|" + recursive + "|" + selection.map { it.ref.path }.sorted().joinToString("|"))
         val task = withContext(Dispatchers.IO) {
             database.withTransaction {
@@ -219,6 +220,8 @@ class Downloads(
         status(task, "RUNNING")
         val seen = mutableSetOf<String>()
         val directory = task.root.substringBefore('?').substringBeforeLast('/') + "/"
+        val savedFiles = archive.downloadedFiles(dao.items(task.id).filter { it.digest.isNotBlank() }).toMutableSet()
+        var savedBytes = savedFiles.sumOf { it.length() }
         while (dao.task(task.id)?.generation == task.generation) {
             val current = dao.items(task.id)
             val item = current.firstOrNull { it.digest.isBlank() && it.path !in seen } ?: break
@@ -230,11 +233,16 @@ class Downloads(
                 return true
             }
             val page = try {
+                archive.files.checkSpace()
                 val ref = ArchiveRef.parse(item.path) ?: throw ArchiveProblem(ConnectionIssue.UNSUPPORTED)
                 archive.open(ref, forDownload = true, network = if (wifiOnly) network else null) {
-                    showProgress(task, item.title, it)
+                    showProgress(task, item.title, it, savedBytes)
                 }
             } catch (failure: ArchiveProblem) {
+                if (failure.issue == ConnectionIssue.NO_SPACE) {
+                    status(task, "PAUSED", failure.issue.label)
+                    return false
+                }
                 val transient = failure.issue in Transient
                 val attempts = dao.task(task.id)?.attempts ?: 0
                 if (transient && attempts < 3 || failure.issue == ConnectionIssue.OFFLINE || failure.issue == ConnectionIssue.WIFI) {
@@ -253,7 +261,9 @@ class Downloads(
                 saveItem(task, item.copy(error = "目录较大，请选择卷册或章节下载"), emptyList())
                 continue
             }
-            if (page.format == PageFormat.ARTICLE) showProgress(task, item.title, ArchiveProgress(ArchiveStage.INDEX))
+            savedBytes += archive.files.resources(page.format, page.digest, page.details)
+                .filter(savedFiles::add).sumOf { it.length() }
+            if (page.format == PageFormat.ARTICLE) showProgress(task, item.title, ArchiveProgress(ArchiveStage.INDEX), savedBytes)
             val paragraphs = archive.paragraphs(page)
             saveItem(task, item.copy(digest = page.digest, discovered = true, error = ""), children, paragraphs)
             val latest = dao.items(task.id)
@@ -270,11 +280,11 @@ class Downloads(
         return false
     }
 
-    private fun showProgress(task: DownloadTask, title: String, progress: ArchiveProgress) {
+    private fun showProgress(task: DownloadTask, title: String, progress: ArchiveProgress, savedBytes: Long) {
         // A late callback from a cancelled HTTP request must not restore the old indicator.
         loading.update {
             if (it[task.id]?.generation != task.generation) it
-            else it + (task.id to DownloadProgress(task.generation, title, progress))
+            else it + (task.id to DownloadProgress(task.generation, title, progress, savedBytes))
         }
     }
 

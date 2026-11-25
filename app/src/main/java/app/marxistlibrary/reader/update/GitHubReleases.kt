@@ -1,5 +1,8 @@
 package app.marxistlibrary.reader.update
 
+import app.marxistlibrary.reader.download.StorageCheckInterval
+import app.marxistlibrary.reader.download.fitsStorage
+
 import app.marxistlibrary.reader.sources.hex
 import app.marxistlibrary.reader.sources.readBounded
 import app.marxistlibrary.reader.sources.readResponse
@@ -26,6 +29,7 @@ internal const val ProjectHomepage = "https://github.com/$Repository"
 internal const val ProjectReleases = "$ProjectHomepage/releases"
 private const val LatestReleaseApi = "https://api.github.com/repos/$Repository/releases/latest"
 private val DownloadHosts = setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
+internal const val MaxUpdateApkBytes = 128L * 1024 * 1024
 
 internal class UpdateProblem(message: String) : IOException(message)
 
@@ -93,6 +97,7 @@ internal class GitHubReleases(client: OkHttpClient = OkHttpClient()) {
         received: (Long) -> Unit,
         verifyApk: (File) -> Unit
     ): File {
+        if (asset.size !in 1..MaxUpdateApkBytes) throw UpdateProblem("更新安装包超出大小限制")
         var url = asset.url
         repeat(6) {
             if (!trustedDownload(url)) throw UpdateProblem("APK 下载地址不属于受支持的 GitHub 来源")
@@ -128,18 +133,26 @@ internal class GitHubReleases(client: OkHttpClient = OkHttpClient()) {
         val length = body.contentLength()
         if (length >= 0 && length != asset.size) throw UpdateProblem("安装包大小与发布信息不符")
         if (!directory.isDirectory && !directory.mkdirs()) throw UpdateProblem("无法创建更新缓存目录")
+        if (!fitsStorage(directory.usableSpace, asset.size)) throw UpdateProblem("本机可用空间不足，请清理后重试")
         val temporary = File.createTempFile("download-", ".apk", directory)
         var verified = false
         try {
             val hash = asset.sha256?.let { MessageDigest.getInstance("SHA-256") }
             val buffer = ByteArray(64 * 1024)
             var size = 0L
+            var nextSpaceCheck = StorageCheckInterval
             body.byteStream().use { input ->
                 temporary.outputStream().buffered().use { output ->
                     while (true) {
                         val count = input.read(buffer)
                         if (count < 0) break
                         if (count > asset.size - size) throw UpdateProblem("安装包大小与发布信息不符")
+                        if (size + count > nextSpaceCheck) {
+                            if (!fitsStorage(directory.usableSpace, asset.size - size)) {
+                                throw UpdateProblem("本机可用空间不足，请清理后重试")
+                            }
+                            nextSpaceCheck = size + count + StorageCheckInterval
+                        }
                         output.write(buffer, 0, count)
                         hash?.update(buffer, 0, count)
                         size += count
@@ -190,7 +203,7 @@ internal fun parseRelease(json: String): GitHubRelease? {
     val page = releases.newBuilder().addPathSegment("tag").addPathSegment(reply.tag).build().toString()
     val apks = reply.assets.filter { it.name.endsWith(".apk", ignoreCase = true) && it.state == "uploaded" && it.size > 0 }
     val asset = apks.singleOrNull { it.name == "MarxistLibrary-$version.apk" } ?: apks.singleOrNull()
-    val apk = asset?.let {
+    val apk = asset?.takeIf { it.size <= MaxUpdateApkBytes }?.let {
         val digest = it.digest?.let(Sha256::matchEntire)?.groupValues?.get(1)
         if (it.digest != null && digest == null) null else {
             val url = releases.newBuilder().addPathSegment("download").addPathSegment(reply.tag).addPathSegment(it.name).build()

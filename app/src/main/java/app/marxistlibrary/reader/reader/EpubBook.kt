@@ -1,5 +1,6 @@
 package app.marxistlibrary.reader.reader
 
+import android.graphics.BitmapFactory
 import android.util.Xml
 import app.marxistlibrary.reader.catalog.ArchiveMarkup
 import app.marxistlibrary.reader.catalog.Heading
@@ -12,28 +13,54 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.net.URI
+import java.util.concurrent.Semaphore
 import java.util.zip.ZipFile
 
 data class EpubChapter(val title: String, val entry: String)
-data class EpubPage(val html: String, val headings: List<Heading>, val images: Map<String, String>)
+data class EpubImage(val entry: String, val bytes: Int)
+data class EpubPage(val html: String, val headings: List<Heading>, val images: Map<String, EpubImage>)
+
+internal class EpubImageBudget(private var remaining: Long = 32L * 1024 * 1024) {
+    fun reserve(bytes: Long): Boolean {
+        if (bytes !in 1..MaxEpubImageBytes || bytes > remaining) return false
+        remaining -= bytes
+        return true
+    }
+}
+
+private const val MaxEpubImageBytes = 18L * 1024 * 1024
+
+internal fun epubImageFits(width: Int, height: Int): Boolean =
+    width in 1..8192 && height in 1..8192 && width.toLong() * height <= 12_000_000
 
 // Resolve reading order from the EPUB spine and serve approved entries directly from the package.
 class EpubBook private constructor(private val file: File, val chapters: List<EpubChapter>) {
-    fun page(index: Int): EpubPage {
+    private val imageReads = Semaphore(2, true)
+
+    fun page(index: Int): EpubPage = ZipFile(file).use { zip ->
         val chapter = chapters[index]
-        val bytes = ZipFile(file).use { zip -> required(zip, chapter.entry, MaxText) }
+        val bytes = required(zip, chapter.entry, MaxText)
         val safe = ArchiveMarkup.cleanBookPage(bytes.toString(Charsets.UTF_8), base(chapter.entry).toString())
-        val images = linkedMapOf<String, String>()
+        val images = linkedMapOf<String, EpubImage>()
+        val budget = EpubImageBudget()
         safe.select("img").forEach { node ->
             val included = resolve(chapter.entry, node.attr("src"))?.entry
-            if (included != null && mime(included) != null && images.size < 150) {
+            val alt = node.attr("alt").ifBlank { "[图片不可用]" }
+            if (included != null && mime(included) != null) {
                 val token = digest(included)
-                images[token] = included
-                node.attr("src", "/image/$token").attr("loading", "lazy")
-            } else {
-                node.after(TextNode(node.attr("alt")))
-                node.remove()
+                if (token !in images && images.size < 150) {
+                    val entry = zip.getEntry(included)
+                    if (entry != null && !entry.isDirectory && budget.reserve(entry.size)) {
+                        images[token] = EpubImage(included, entry.size.toInt())
+                    }
+                }
+                if (token in images) {
+                    node.attr("alt", alt).attr("src", "/image/$token").attr("loading", "lazy")
+                    return@forEach
+                }
             }
+            node.after(TextNode(alt))
+            node.remove()
         }
         safe.select("a[href]").forEach { node ->
             val href = node.attr("href")
@@ -51,21 +78,33 @@ class EpubBook private constructor(private val file: File, val chapters: List<Ep
             }
         }
         val headings = ArchiveMarkup.contents(safe.body())
-        return EpubPage(safe.body().html(), headings, images)
+        EpubPage(safe.body().html(), headings, images)
     }
 
     fun image(page: EpubPage, token: String): ReaderAsset? {
-        val name = page.images[token] ?: return null
-        val type = mime(name) ?: return null
-        return runCatching {
-            val bytes = ZipFile(file).use { zip -> required(zip, name, MaxImage) }
-            ReaderAsset(type, ByteArrayInputStream(bytes))
-        }.getOrNull()
+        val image = page.images[token] ?: return null
+        val type = mime(image.entry) ?: return null
+        try {
+            imageReads.acquire()
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return null
+        }
+        try {
+            val bytes = ZipFile(file).use { zip -> required(zip, image.entry, image.bytes) }
+            if (bytes.size != image.bytes) return null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            return if (epubImageFits(bounds.outWidth, bounds.outHeight)) ReaderAsset(type, ByteArrayInputStream(bytes)) else null
+        } catch (_: IOException) {
+            return null
+        } finally {
+            imageReads.release()
+        }
     }
 
     companion object {
         private const val MaxText = 7 * 1024 * 1024
-        private const val MaxImage = 18 * 1024 * 1024
         private const val MaxMetadata = 2 * 1024 * 1024
         private const val Host = "epub.invalid"
 

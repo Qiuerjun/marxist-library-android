@@ -14,6 +14,7 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.InetAddress
+import java.net.Proxy
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.time.Duration
@@ -27,6 +28,7 @@ enum class ConnectionIssue(val label: String) {
     OFFLINE("当前设备未联网"),
     TIMEOUT("连接超时"),
     DNS("无法解析站点"),
+    NETWORK_ADDRESS("镜像地址受当前网络规则限制"),
     CERTIFICATE("无法验证 HTTPS 证书"),
     MISSING("当前来源缺少这篇文献"),
     LIMITED("来源暂时限流"),
@@ -36,6 +38,7 @@ enum class ConnectionIssue(val label: String) {
     UNSUPPORTED("此文献暂时无法在阅读器中显示"),
     TOO_LARGE("文件超出阅读器处理上限"),
     WIFI("等待 Wi-Fi"),
+    NO_SPACE("本机可用空间不足，请清理后继续"),
     STORAGE("无法写入本机存储")
 }
 
@@ -59,11 +62,16 @@ class ArchiveHttp(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .followRedirects(false)
         .followSslRedirects(false)
-        .dns(publicDns(Dns.SYSTEM::lookup))
         .connectTimeout(Duration.ofSeconds(5))
         .readTimeout(Duration.ofSeconds(10))
-        .build()
+        .build(),
+    private val useSystemProxy: suspend () -> Boolean = { false }
 ) {
+    private val publicDirect = client.newBuilder().proxy(Proxy.NO_PROXY)
+        .dns(mirrorDns(client.dns::lookup) { false }).build()
+    private val localDirect = client.newBuilder().proxy(Proxy.NO_PROXY)
+        .dns(mirrorDns(client.dns::lookup) { true }).build()
+
     suspend fun get(
         source: Source,
         path: String,
@@ -99,13 +107,22 @@ class ArchiveHttp(
         network: Network?,
         read: (Response) -> T
     ): T {
-        val transport = if (network == null) client else client.newBuilder()
-            .dns(publicDns { network.getAllByName(it).toList() })
-            .socketFactory(network.socketFactory)
-            .build()
+        val allowLocal = source.custom && source.allowLocalNetwork
+        val proxy = !allowLocal && useSystemProxy()
+        val direct = if (allowLocal) localDirect else publicDirect
+        val transport = if (network == null && !proxy) direct else {
+            (if (proxy) client else direct).newBuilder().apply {
+                if (network != null) socketFactory(network.socketFactory)
+                dns(mirrorDns({ host -> network?.getAllByName(host)?.toList() ?: client.dns.lookup(host) }) { host ->
+                    // The opted-in proxy can live on the device or LAN. Target names on direct routes still use the filter.
+                    allowLocal || (proxy && !source.matchesHostName(host))
+                })
+            }.build()
+        }
         var url = source.address(path)
         repeat(5) {
             if (!source.accepts(url)) throw ArchiveProblem(ConnectionIssue.WRONG_CONTENT)
+            if (!mirrorHostAllowed(url.host, allowLocal)) throw ArchiveProblem(ConnectionIssue.NETWORK_ADDRESS)
             val request = Request.Builder().url(url).headers(headers)
                 .header("User-Agent", "ChineseArchiveReader/1.0 (Android)")
                 .build()
@@ -125,6 +142,7 @@ class ArchiveHttp(
             } catch (failure: IOException) {
                 throw when (failure) {
                     is ArchiveProblem -> failure
+                    is MirrorAddressRejected -> ArchiveProblem(ConnectionIssue.NETWORK_ADDRESS)
                     is UnknownHostException -> ArchiveProblem(ConnectionIssue.DNS)
                     is SocketTimeoutException -> ArchiveProblem(ConnectionIssue.TIMEOUT)
                     is SSLException -> ArchiveProblem(ConnectionIssue.CERTIFICATE)
@@ -163,24 +181,47 @@ class ArchiveHttp(
             }
         }
 
-        private fun publicDns(resolve: (String) -> List<InetAddress>) = object : Dns {
-            override fun lookup(hostname: String): List<InetAddress> {
-                val public = resolve(hostname).filter(::isPublic)
-                if (public.isEmpty()) throw UnknownHostException("Public address required for archive sources")
-                return public
-            }
-        }
-
-        private fun isPublic(address: InetAddress): Boolean {
-            if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
-                address.isSiteLocalAddress || address.isMulticastAddress) return false
-            val bytes = address.address
-            val first = bytes[0].toInt() and 255
-            val second = bytes[1].toInt() and 255
-            if (bytes.size == 16) return first and 0xfe != 0xfc
-            return first in 1..223 && !(first == 100 && second in 64..127)
-        }
     }
+}
+
+private class MirrorAddressRejected : UnknownHostException("Mirror address rejected by network policy")
+
+private fun mirrorDns(resolve: (String) -> List<InetAddress>, allowLocal: (String) -> Boolean) = object : Dns {
+    override fun lookup(hostname: String): List<InetAddress> {
+        val answers = resolve(hostname)
+        val permitted = answers.filter { mirrorAddressAllowed(it, allowLocal(hostname)) }
+        if (permitted.isEmpty() && answers.isNotEmpty()) throw MirrorAddressRejected()
+        return permitted
+    }
+}
+
+// OkHttp handles numeric hosts without invoking the configured DNS resolver.
+internal fun mirrorHostAllowed(host: String, allowLocal: Boolean): Boolean {
+    val address = when {
+        ':' in host -> runCatching { InetAddress.getByName(host) }.getOrNull() ?: return false
+        host.isNotEmpty() && host.all { it == '.' || it in '0'..'9' } -> {
+            val parts = host.split('.')
+            if (parts.size != 4) return false
+            val bytes = parts.map { part ->
+                if (part.length > 1 && part.startsWith('0')) return false
+                part.toIntOrNull()?.takeIf { it in 0..255 }?.toByte() ?: return false
+            }.toByteArray()
+            InetAddress.getByAddress(bytes)
+        }
+        else -> return true
+    }
+    return mirrorAddressAllowed(address, allowLocal)
+}
+
+internal fun mirrorAddressAllowed(address: InetAddress, allowLocal: Boolean): Boolean {
+    if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
+        address.isMulticastAddress) return false
+    val bytes = address.address
+    val first = bytes[0].toInt() and 255
+    val second = bytes[1].toInt() and 255
+    if (address.isSiteLocalAddress || bytes.size == 16 && first and 0xfe == 0xfc) return allowLocal
+    if (bytes.size == 16) return true
+    return first in 1..223 && !(first == 100 && second in 64..127)
 }
 
 internal suspend fun <T> Call.readResponse(discard: (T) -> Unit = {}, read: (Response) -> T): T =

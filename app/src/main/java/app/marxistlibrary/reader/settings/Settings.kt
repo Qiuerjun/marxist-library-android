@@ -49,6 +49,7 @@ data class ReadingSettings(
     val readingWidth: ReadingWidth = ReadingWidth.STANDARD,
     val fixedSource: String = "",
     val wifiOnly: Boolean = false,
+    val useSystemProxy: Boolean = false,
     val autoRefresh: Boolean = false,
     val lastUpdate: String = "",
     val speechRate: Int = 100,
@@ -68,6 +69,7 @@ class Settings(context: Context) {
     private val readingWidth = stringPreferencesKey("reading_width")
     private val fixedSource = stringPreferencesKey("fixed_source")
     private val wifiOnly = booleanPreferencesKey("wifi_only")
+    private val useSystemProxy = booleanPreferencesKey("use_system_proxy")
     private val autoRefresh = booleanPreferencesKey("auto_refresh")
     private val lastUpdate = stringPreferencesKey("last_update")
     private val speechRate = intPreferencesKey("speech_rate")
@@ -90,6 +92,7 @@ class Settings(context: Context) {
             readingWidth = ReadingWidth.entries.firstOrNull { it.name == saved[readingWidth] } ?: ReadingWidth.STANDARD,
             fixedSource = saved[fixedSource].orEmpty(),
             wifiOnly = saved[wifiOnly] ?: false,
+            useSystemProxy = saved[useSystemProxy] ?: false,
             autoRefresh = saved[autoRefresh] ?: false,
             lastUpdate = saved[lastUpdate].orEmpty(),
             speechRate = (saved[speechRate] ?: 100).coerceIn(65, 160),
@@ -114,6 +117,7 @@ class Settings(context: Context) {
     suspend fun readingWidth(value: ReadingWidth) = save(readingWidth, value.name)
     suspend fun fixedSource(value: String) = save(fixedSource, value)
     suspend fun wifiOnly(value: Boolean) = save(wifiOnly, value)
+    suspend fun useSystemProxy(value: Boolean) = save(useSystemProxy, value)
     suspend fun autoRefresh(value: Boolean) = save(autoRefresh, value)
     suspend fun lastUpdate(value: String) = save(lastUpdate, value)
     suspend fun speechRate(value: Int) = save(speechRate, value.coerceIn(65, 160))

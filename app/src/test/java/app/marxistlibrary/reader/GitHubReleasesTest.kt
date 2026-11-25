@@ -1,6 +1,7 @@
 package app.marxistlibrary.reader
 
 import app.marxistlibrary.reader.update.GitHubReleases
+import app.marxistlibrary.reader.update.MaxUpdateApkBytes
 import app.marxistlibrary.reader.update.ProjectReleases
 import app.marxistlibrary.reader.update.ReleaseApk
 import app.marxistlibrary.reader.update.ReleaseVersion
@@ -67,6 +68,14 @@ class GitHubReleasesTest {
         """.trimIndent()))
         assertNull(mixed.apk)
         assertNull(parseRelease("""{"tag_name":"v1.1.7-beta","prerelease":true}"""))
+    }
+
+    @Test
+    fun leavesOversizedUpdatesOnTheReleasePage() {
+        val release = requireNotNull(parseRelease("""
+            {"tag_name":"v1.1.9","assets":[{"name":"reader.apk","state":"uploaded","size":${MaxUpdateApkBytes + 1}}]}
+        """.trimIndent()))
+        assertNull(release.apk)
     }
 
     @Test
